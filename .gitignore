@@ -35,6 +35,7 @@ data/file_list.txt
 results/*.png
 results/*.csv
 results/*.pdf
+results/*.txt
 
 # OS
 .DS_Store
