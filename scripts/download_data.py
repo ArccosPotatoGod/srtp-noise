@@ -62,42 +62,56 @@ def download_librispeech_subset(data_dir, n_samples=N_SAMPLES):
 def generate_synthetic_signals(data_dir, n_samples):
     """Generate synthetic speech-like test signals for offline use.
 
-    Uses a combination of sine sweeps and amplitude modulation
-    to create simple test signals that approximate speech.
+    Uses bandpass-filtered noise with time-varying amplitude envelopes
+    to approximate speech. Noise-driven signals have rapidly decaying
+    autocorrelation (unlike pure sine waves), avoiding oscillatory SNR
+    artifacts when the signal is delayed.
     """
-    import scipy.signal as signal
+    from scipy.signal import butter, lfilter
 
     os.makedirs(data_dir, exist_ok=True)
     paths = []
 
     for i in range(n_samples):
         duration = np.random.uniform(10, 15)
-        t = np.linspace(0, duration, int(SAMPLE_RATE * duration))
+        T = int(SAMPLE_RATE * duration)
 
-        # Speech-like: fundamental + harmonics + noise
-        f0 = np.random.uniform(100, 200)
-        sig = (
-            0.6 * np.sin(2 * np.pi * f0 * t)
-            + 0.3 * np.sin(2 * np.pi * f0 * 2 * t)
-            + 0.1 * np.sin(2 * np.pi * f0 * 3 * t)
-        )
+        # Speech-band filtered noise (300-3400 Hz) as carrier
+        rng = np.random.default_rng(100 + i)
+        noise = rng.normal(0, 1, T)
 
-        # Amplitude envelope to simulate syllables
-        envelope_freq = np.random.uniform(2, 5)
-        envelope = 0.5 + 0.5 * np.sin(2 * np.pi * envelope_freq * t)
-        sig = sig * envelope
+        # Bandpass filter to speech range
+        nyq = 0.5 * SAMPLE_RATE
+        b, a = butter(4, [300 / nyq, 3400 / nyq], btype="bandpass")
+        carrier = lfilter(b, a, noise)
 
-        # Add slight noise
-        sig = sig + 0.02 * np.random.randn(len(t))
+        # Time-varying envelope: syllables (onsets every 150-400ms)
+        envelope = np.ones(T)
+        syllable_period = int(SAMPLE_RATE * np.random.uniform(0.15, 0.40))
+        for onset in range(0, T, syllable_period):
+            # Each syllable: fast attack, slow decay
+            syl_len = min(syllable_period, T - onset)
+            t_syl = np.arange(syl_len) / SAMPLE_RATE
+            attack = 0.02 + 0.03 * np.random.random()
+            decay = 0.08 + 0.12 * np.random.random()
+            amp = 0.3 + 0.7 * np.random.random()
+            syl_env = amp * (np.exp(-t_syl / decay) - np.exp(-t_syl / attack))
+            syl_env = syl_env / (np.max(np.abs(syl_env)) + 1e-10)
+            if onset + syl_len <= T:
+                envelope[onset:onset + syl_len] += syl_env
+
+        sig = carrier * envelope
 
         # Normalize
-        sig = sig / np.max(np.abs(sig)) * 0.9
+        peak = np.max(np.abs(sig))
+        if peak > 0:
+            sig = sig / peak * 0.9
 
         filepath = os.path.join(data_dir, f"synth_sample_{i:03d}.wav")
         sf.write(filepath, sig.astype(np.float32), SAMPLE_RATE)
         paths.append(filepath)
 
-    print(f"Generated {n_samples} synthetic samples.")
+    print(f"Generated {n_samples} synthetic samples (noise-driven, speech-band).")
     return paths
 
 

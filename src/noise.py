@@ -57,10 +57,17 @@ def adaptive_coherent_noise(s, estimated_distance, fs=16000, rng=None):
     """Generate coherent noise with adaptive coupling weight.
 
     Improvement (Section 6): adjusts the speech-component weight alpha
-    based on estimated eavesdropper distance:
-    - Close range (<2m): alpha=1.2 — high coupling resists denoising.
-    - Medium range (2-4m): alpha=0.8 — moderate coupling.
-    - Far range (>4m): alpha=0.4 — low coupling, maximize jamming.
+    based on estimated eavesdropper distance.
+    - Close range (<2m): alpha=0.5 — cancellation is strong, light coupling
+      suffices; too much coupling would add unnecessary speech leakage.
+    - Medium range (2-4m): alpha=0.8 — moderate distance needs moderate
+      coupling to balance masking power and denoising resistance.
+    - Far range (>4m): alpha=1.2 — cancellation weakens with distance;
+      high coupling keeps noise tightly bound to speech, resisting ICA
+      even when the cancelling signal has faded.
+
+    The key insight: higher alpha → stronger speech-noise coupling →
+    lower SNR (better privacy). So alpha should INCREASE with distance.
 
     Parameters
     ----------
@@ -82,11 +89,11 @@ def adaptive_coherent_noise(s, estimated_distance, fs=16000, rng=None):
         rng = np.random.default_rng()
 
     if estimated_distance < 2.0:
-        alpha = 1.2
+        alpha = 0.5
     elif estimated_distance < 4.0:
         alpha = 0.8
     else:
-        alpha = 0.4
+        alpha = 1.2
 
     T = len(s)
     n_M = rng.normal(0, 0.5, T)

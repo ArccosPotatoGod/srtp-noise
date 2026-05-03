@@ -116,8 +116,15 @@ def generate_all_noises(s, distance, rng=None):
     }
 
 
-def apply_attack(mixed, s_original, attack_name, distance, angle_rad):
-    """Apply a single denoising attack to the mixed signal."""
+def apply_attack(mixed, s_original, attack_name, distance, angle_rad,
+                 method_name="coherent_fixed"):
+    """Apply a single denoising attack to the mixed signal.
+
+    Parameters
+    ----------
+    method_name : str
+        Jamming method name, used by ICA to match noise type on second channel.
+    """
     if attack_name == "none":
         return mixed
 
@@ -128,13 +135,19 @@ def apply_attack(mixed, s_original, attack_name, distance, angle_rad):
         return apply_bandpass(mixed, FS)
 
     elif attack_name == "ica":
-        # Second channel: slightly different spy position
+        # Second channel: slightly different spy position, SAME noise type
         spy2 = (distance * np.cos(angle_rad + 0.1),
                 distance * np.sin(angle_rad + 0.1))
         res2, _ = apply_cancellation(s_original, SRC_POS, JAMMER_POS, spy2, FS)
-        # Regenerate same-type noise for second channel
+
         rng2 = np.random.default_rng(42)
-        n2 = generate_coherent_noise(s_original, FS, rng=rng2)
+        if method_name == "gaussian":
+            n2 = generate_gaussian_noise(len(s_original), FS, rng=rng2)
+        elif method_name == "adaptive":
+            n2 = adaptive_coherent_noise(s_original, distance, FS, rng=rng2)
+        else:
+            n2 = generate_coherent_noise(s_original, FS, rng=rng2)
+
         mixed2 = res2 + n2[:len(res2)]
         S_ = ica_denoise(mixed, mixed2)
         return select_speech_component(S_, s_original)
@@ -218,20 +231,24 @@ def run_single_demo(s, spy_distance=2.0, angle_deg=15.0, output_dir="results"):
         })
         print(f"{label:<35} {snr:>10.2f} {seg:>12.2f}")
 
-    # Also show after-attack results
+    # Also show after-attack results (one attack per method)
     print(f"\n{'After denoising attacks:':<35} {'SNR (dB)':>10} {'SegSNR (dB)':>12}")
     print(f"{'-'*57}")
-    coherent_mixed = mixed["coherent_fixed"]
-    for att in ["bandstop", "bandpass", "ica", "beamforming"]:
-        angle_rad = np.deg2rad(angle_deg)
-        processed = apply_attack(coherent_mixed, s, att, spy_distance, angle_rad)
-        snr = compute_snr(s, processed)
-        seg = compute_segment_snr(s, processed)
-        mfcc = compute_mfcc_distance(s, processed, FS)
-        report_data["metrics"].append({
-            "label": f"coherent→{att}", "snr": snr, "seg_snr": seg, "mfcc_dist": mfcc,
-        })
-        print(f"  {att:<33} {snr:>10.2f} {seg:>12.2f}")
+    for method_name in METHODS:
+        for att in ["bandstop", "bandpass", "ica", "beamforming"]:
+            angle_rad = np.deg2rad(angle_deg)
+            processed = apply_attack(mixed[method_name], s, att,
+                                     spy_distance, angle_rad,
+                                     method_name=method_name)
+            snr = compute_snr(s, processed)
+            seg = compute_segment_snr(s, processed)
+            mfcc = compute_mfcc_distance(s, processed, FS)
+            report_data["metrics"].append({
+                "label": f"{method_name}→{att}", "snr": snr,
+                "seg_snr": seg, "mfcc_dist": mfcc,
+            })
+            if method_name == "coherent_fixed":
+                print(f"  {method_name}→{att:<24} {snr:>10.2f} {seg:>12.2f}")
 
     # Signal statistics
     for name, sig in [("original s(t)", s), ("direct at spy", s_direct),
@@ -333,7 +350,8 @@ def run_batch_experiments(s, output_dir="results"):
 
                 for attack_name in ATTACKS:
                     processed = apply_attack(
-                        mixed, s, attack_name, distance, angle_rad)
+                        mixed, s, attack_name, distance, angle_rad,
+                        method_name=method_name)
 
                     snr_val = compute_snr(s, processed)
                     mfcc_dist = compute_mfcc_distance(s, processed, FS)

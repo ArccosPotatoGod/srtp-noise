@@ -39,8 +39,22 @@ def apply_cancellation(s, src_pos, jammer_pos, spy_pos, fs):
     # Reference signal at jammer (approximates reference mic)
     s_ref = propagate_signal(s, src_pos, jammer_pos, fs)
 
-    # Inverted replica
-    anti_signal = -s_ref
+    # Gain calibration: match cancel amplitude to direct amplitude at spy.
+    # Without calibration, the ref mic's proximity (0.2m vs spy at 1-5m)
+    # makes the cancel signal 3-5× louder than direct → over-compensation.
+    d_ref = compute_distance(src_pos, jammer_pos)
+    d_jam_to_spy = compute_distance(jammer_pos, spy_pos)
+    d_src_to_spy = compute_distance(src_pos, spy_pos)
+
+    atten_ref = 1.0 / (d_ref + 0.1)
+    atten_direct = 1.0 / (d_src_to_spy + 0.1)
+    atten_cancel_path = 1.0 / (d_jam_to_spy + 0.1)
+
+    # Normalize so: |anti * atten_cancel_path| = |atten_direct|
+    # anti = -s_ref * gain, where gain * atten_cancel_path = atten_direct
+    gain = atten_direct / (atten_ref * atten_cancel_path + 1e-10)
+
+    anti_signal = -s_ref * gain
 
     # Cancelling signal emitted from jammer to spy
     s_cancel = propagate_signal(anti_signal, jammer_pos, spy_pos, fs)
