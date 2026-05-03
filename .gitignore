@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+env/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data & results (large files)
+data/*.wav
+data/*.flac
+data/*.tar.gz
+data/LibriSpeech/
+data/file_list.txt
+results/*.png
+results/*.csv
+results/*.pdf
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python env
+.python-version
+
+# Mypy
+.mypy_cache/
+
+# Pytest
+.pytest_cache/
+
+# Coverage
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
