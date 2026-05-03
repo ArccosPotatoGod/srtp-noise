@@ -181,7 +181,13 @@ def run_single_demo(s, spy_distance=2.0, angle_deg=15.0, output_dir="results"):
         n = noises[name][:len(residual)]
         mixed[name] = residual + n
 
-    # 4. Print SNR table
+    # 4. Build metrics for both console and text report
+    report_data = {
+        "spy_distance": spy_distance, "angle_deg": angle_deg,
+        "fs": FS, "src_pos": SRC_POS, "jammer_pos": JAMMER_POS,
+        "metrics": [], "signal_stats": [], "noise_stats": [], "geometry": [],
+    }
+
     print(f"\n{'='*60}")
     print(f"  Single Sample Demo  |  distance = {spy_distance}m  angle = {angle_deg}°")
     print(f"{'='*60}")
@@ -196,12 +202,20 @@ def run_single_demo(s, spy_distance=2.0, angle_deg=15.0, output_dir="results"):
     for name, sig in all_signals.items():
         snr = compute_snr(s, sig)
         seg = compute_segment_snr(s, sig)
+        mfcc = compute_mfcc_distance(s, sig, FS)
+        report_data["metrics"].append({
+            "label": name, "snr": snr, "seg_snr": seg, "mfcc_dist": mfcc,
+        })
         print(f"{name:<35} {snr:>10.2f} {seg:>12.2f}")
 
     for method_name in METHODS:
         label = f"+ {method_name}"
         snr = compute_snr(s, mixed[method_name])
         seg = compute_segment_snr(s, mixed[method_name])
+        mfcc = compute_mfcc_distance(s, mixed[method_name], FS)
+        report_data["metrics"].append({
+            "label": label, "snr": snr, "seg_snr": seg, "mfcc_dist": mfcc,
+        })
         print(f"{label:<35} {snr:>10.2f} {seg:>12.2f}")
 
     # Also show after-attack results
@@ -213,7 +227,38 @@ def run_single_demo(s, spy_distance=2.0, angle_deg=15.0, output_dir="results"):
         processed = apply_attack(coherent_mixed, s, att, spy_distance, angle_rad)
         snr = compute_snr(s, processed)
         seg = compute_segment_snr(s, processed)
+        mfcc = compute_mfcc_distance(s, processed, FS)
+        report_data["metrics"].append({
+            "label": f"coherent→{att}", "snr": snr, "seg_snr": seg, "mfcc_dist": mfcc,
+        })
         print(f"  {att:<33} {snr:>10.2f} {seg:>12.2f}")
+
+    # Signal statistics
+    for name, sig in [("original s(t)", s), ("direct at spy", s_direct),
+                       ("residual", residual)]:
+        report_data["signal_stats"].append({
+            "label": name,
+            "min": float(np.min(sig)), "max": float(np.max(sig)),
+            "rms": float(np.sqrt(np.mean(sig ** 2))),
+            "peak_to_rms": float(np.max(np.abs(sig)) / (np.sqrt(np.mean(sig ** 2)) + 1e-10)),
+        })
+
+    # Noise statistics
+    for method_name in METHODS:
+        n = noises[method_name][:len(residual)]
+        report_data["noise_stats"].append({
+            "label": f"{method_name} noise",
+            "rms": float(np.sqrt(np.mean(n ** 2))),
+            "peak": float(np.max(np.abs(n))),
+        })
+
+    # Geometry info
+    for label, p in [("src", SRC_POS), ("jammer", JAMMER_POS), ("spy", spy_pos)]:
+        d = np.linalg.norm(np.array(p) - np.array(SRC_POS))
+        delay = int(round(d / SPEED_OF_SOUND * FS))
+        report_data["geometry"].append({
+            "label": label, "pos": p, "dist": d, "delay": delay,
+        })
 
     # 5. Waveform plot
     wave_signals = [s, s_direct, residual,
@@ -245,6 +290,9 @@ def run_single_demo(s, spy_distance=2.0, angle_deg=15.0, output_dir="results"):
         output_path=os.path.join(output_dir, "spectrogram_demo.png"))
     plt.close(fig_spec)
     print(f"Spectrogram plot -> {output_dir}/spectrogram_demo.png")
+
+    # 7. Save single-demo text report
+    write_single_demo_report(report_data, output_dir)
 
     return mixed, noises
 
@@ -373,50 +421,238 @@ def generate_summary_charts(df, output_dir="results"):
     print("\nAll charts generated in:", os.path.abspath(output_dir))
 
 
+def _fmt_table(headers, rows, col_widths=None):
+    """Format aligned text table. Returns list of strings."""
+    if col_widths is None:
+        col_widths = [max(len(str(h)), max((len(str(r[i])) for r in rows), default=0))
+                      for i, h in enumerate(headers)]
+    sep = "  "
+    out = []
+    out.append(sep.join(str(h).ljust(col_widths[i]) for i, h in enumerate(headers)))
+    out.append(sep.join("-" * w for w in col_widths))
+    for row in rows:
+        out.append(sep.join(str(v).ljust(col_widths[i]) for i, v in enumerate(row)))
+    return out
+
+
+def _pivot_table(df, index_col, column_col, value_col, agg="mean"):
+    """Return a formatted pivot table as list of strings."""
+    pivot = df.pivot_table(values=value_col, index=index_col,
+                           columns=column_col, aggfunc=agg)
+    # Build rows: index label + each column value
+    headers = [index_col] + [str(c) for c in pivot.columns]
+    rows = []
+    for idx, row in pivot.iterrows():
+        rows.append([str(idx)] + [f"{v:.2f}" for v in row.values])
+    return _fmt_table(headers, rows)
+
+
 def write_summary_report(df, path):
-    """Write a human-readable summary of key findings."""
-    lines = []
-    lines.append("=" * 60)
-    lines.append("MicFrozen Simulation — Experiment Summary")
-    lines.append("Based on Gao et al., MobiCom 2023")
-    lines.append("=" * 60)
-    lines.append("")
+    """Write comprehensive text report with all numerical results."""
 
-    # Best jamming method (lowest SNR = best privacy)
-    lines.append("--- Jamming Effectiveness (SNR, lower = better) ---")
-    for method in METHODS:
-        sub = df[(df["method"] == method) & (df["attack"] == "none")]
-        avg_snr = sub["snr"].mean()
-        lines.append(f"  {method:<20} avg SNR = {avg_snr:.2f} dB")
-
-    lines.append("")
-    lines.append("--- Attack Resilience (SNR after denoising) ---")
-    for att in ATTACKS:
-        if att == "none":
-            continue
-        sub = df[df["attack"] == att]
-        if len(sub) == 0:
-            continue
-        avg_snr = sub["snr"].mean()
-        lines.append(f"  After {att:<15} avg SNR = {avg_snr:.2f} dB")
-
-    lines.append("")
-    lines.append("--- Adaptive vs Fixed Coherent (SNR at far range >= 4m) ---")
-    far = df[(df["distance"] >= 4.0) & (df["attack"] == "none")]
-    for method in ["coherent_fixed", "adaptive"]:
-        sub = far[far["method"] == method]
-        if len(sub) > 0:
-            lines.append(f"  {method:<20} avg SNR = {sub['snr'].mean():.2f} dB")
-
-    lines.append("")
-    lines.append("--- Distance Effect ---")
-    for d in DISTANCES:
-        sub = df[(df["distance"] == d) & (df["attack"] == "none")]
-        avg_snr = sub["snr"].mean()
-        lines.append(f"  {d}m: avg SNR = {avg_snr:.2f} dB")
+    def w(lines_list):
+        """Join and write a block of lines."""
+        if isinstance(lines_list, list):
+            f.write("\n".join(lines_list) + "\n\n")
 
     with open(path, "w") as f:
-        f.write("\n".join(lines))
+        # ── Header ──
+        f.write("=" * 78 + "\n")
+        f.write("  MicFrozen Simulation — Comprehensive Experiment Report\n")
+        f.write("  Gao et al., MobiCom 2023\n")
+        f.write("=" * 78 + "\n\n")
+
+        f.write(f"Generated: {pd.Timestamp.now()}\n")
+        f.write(f"Rows: {len(df)}\n")
+        f.write(f"Distances: {DISTANCES}\n")
+        f.write(f"Angles: {ANGLES}\n")
+        f.write(f"Methods: {METHODS}\n")
+        f.write(f"Attacks: {ATTACKS}\n")
+        f.write(f"Metrics: snr, seg_snr, mfcc_distance\n\n")
+
+        # ── Section 1: Full Data Table ──
+        f.write("=" * 78 + "\n")
+        f.write("  SECTION 1: FULL DATA TABLE (all combinations)\n")
+        f.write("=" * 78 + "\n\n")
+
+        cols = ["distance", "angle", "method", "attack", "snr", "seg_snr", "mfcc_distance"]
+        headers = ["dist", "ang", "method", "attack", "snr(dB)", "segSNR", "mfcc_dist"]
+        rows = []
+        for _, r in df.iterrows():
+            rows.append([
+                f"{r['distance']:.0f}",
+                f"{r['angle']:.0f}",
+                r["method"],
+                r["attack"],
+                f"{r['snr']:.2f}",
+                f"{r['seg_snr']:.2f}",
+                f"{r['mfcc_distance']:.3f}",
+            ])
+        w(_fmt_table(headers, rows))
+
+        # ── Section 2: SNR Pivot — Method × Attack ──
+        f.write("=" * 78 + "\n")
+        f.write("  SECTION 2: SNR(dB) — Method × Attack (avg over distance & angle)\n")
+        f.write("=" * 78 + "\n\n")
+        w(_pivot_table(df, "method", "attack", "snr"))
+
+        # ── Section 3: SNR Pivot — Distance × Method ──
+        f.write("=" * 78 + "\n")
+        f.write("  SECTION 3: SNR(dB) — Distance × Method (avg over angle, no attack)\n")
+        f.write("=" * 78 + "\n\n")
+        df_noatt = df[df["attack"] == "none"]
+        w(_pivot_table(df_noatt, "distance", "method", "snr"))
+
+        # ── Section 4: SNR Pivot — Distance × Angle ──
+        f.write("=" * 78 + "\n")
+        f.write("  SECTION 4: SNR(dB) — Distance × Angle (avg over method, no attack)\n")
+        f.write("=" * 78 + "\n\n")
+        w(_pivot_table(df_noatt, "distance", "angle", "snr"))
+
+        # ── Section 5: SegSNR Pivots ──
+        f.write("=" * 78 + "\n")
+        f.write("  SECTION 5: SegSNR(dB) — Method × Attack (avg over distance & angle)\n")
+        f.write("=" * 78 + "\n\n")
+        w(_pivot_table(df, "method", "attack", "seg_snr"))
+
+        # ── Section 6: MFCC Distance Pivots ──
+        f.write("=" * 78 + "\n")
+        f.write("  SECTION 6: MFCC Distance — Method × Attack (avg, lower=better)\n")
+        f.write("=" * 78 + "\n\n")
+        w(_pivot_table(df, "method", "attack", "mfcc_distance"))
+
+        # ── Section 7: SNR Heatmap Matrices (text) ──
+        f.write("=" * 78 + "\n")
+        f.write("  SECTION 7: SNR Heatmap Matrices (distance × angle, no attack)\n")
+        f.write("=" * 78 + "\n\n")
+        for method in METHODS:
+            f.write(f"--- {method} ---\n")
+            sub = df[(df["method"] == method) & (df["attack"] == "none")]
+            pivot = sub.pivot_table(values="snr", index="distance",
+                                    columns="angle", aggfunc="mean")
+            # Headers: angle labels
+            ang_labels = [f"{int(a)}°" for a in pivot.columns]
+            header_line = "dist  " + "  ".join(f"{a:>7}" for a in ang_labels)
+            f.write(header_line + "\n")
+            f.write("-" * len(header_line) + "\n")
+            for dist_idx, row in pivot.iterrows():
+                vals = "  ".join(f"{v:>7.2f}" for v in row.values)
+                f.write(f"{dist_idx:>4.0f}  {vals}\n")
+            f.write("\n")
+
+        # ── Section 8: Statistical Summary ──
+        f.write("=" * 78 + "\n")
+        f.write("  SECTION 8: Statistical Summary (SNR dB, no attack)\n")
+        f.write("=" * 78 + "\n\n")
+
+        for group_col, group_name in [("method", "Method"), ("distance", "Distance"),
+                                       ("angle", "Angle")]:
+            f.write(f"--- By {group_name} ---\n")
+            grouped = df_noatt.groupby(group_col)["snr"]
+            stats_rows = []
+            for name, grp in grouped:
+                stats_rows.append([
+                    str(name),
+                    f"{grp.mean():.2f}",
+                    f"{grp.std():.2f}",
+                    f"{grp.min():.2f}",
+                    f"{grp.max():.2f}",
+                    f"{len(grp)}",
+                ])
+            w(_fmt_table(
+                [group_name, "mean", "std", "min", "max", "N"], stats_rows))
+            f.write("\n")
+
+        # ── Section 9: Attack Impact ──
+        f.write("=" * 78 + "\n")
+        f.write("  SECTION 9: Attack Impact — SNR change relative to no-attack\n")
+        f.write("=" * 78 + "\n\n")
+
+        baseline = df_noatt.groupby(["distance", "angle", "method"])["snr"].mean()
+        impact_rows = []
+        for att in [a for a in ATTACKS if a != "none"]:
+            sub = df[df["attack"] == att].copy()
+            sub["baseline"] = sub.apply(
+                lambda r: baseline.get((r["distance"], r["angle"], r["method"]), 0),
+                axis=1)
+            sub["delta"] = sub["snr"] - sub["baseline"]
+            impact_rows.append([
+                att,
+                f"{sub['delta'].mean():+.2f}",
+                f"{sub['delta'].std():.2f}",
+                f"{sub['delta'].min():+.2f}",
+                f"{sub['delta'].max():+.2f}",
+            ])
+        w(_fmt_table(
+            ["attack", "delta_mean", "delta_std", "delta_min", "delta_max"], impact_rows))
+        f.write("(positive delta = attack improved SNR / recovered speech)\n\n")
+
+        # ── Section 10: Top/Bottom performers ──
+        f.write("=" * 78 + "\n")
+        f.write("  SECTION 10: Best & Worst Privacy (SNR, lower = better privacy)\n")
+        f.write("=" * 78 + "\n\n")
+
+        top10 = df.nsmallest(10, "snr")
+        bottom10 = df.nlargest(10, "snr")
+
+        f.write("--- Top 10 Lowest SNR (best privacy) ---\n")
+        for _, r in top10.iterrows():
+            f.write(f"  d={r['distance']:.0f}m  a={r['angle']:>2}deg  "
+                    f"method={r['method']:<15}  attack={r['attack']:<12}  "
+                    f"SNR={r['snr']:.2f}dB\n")
+        f.write(f"\n--- Top 10 Highest SNR (worst privacy) ---\n")
+        for _, r in bottom10.iterrows():
+            f.write(f"  d={r['distance']:.0f}m  a={r['angle']:>2}deg  "
+                    f"method={r['method']:<15}  attack={r['attack']:<12}  "
+                    f"SNR={r['snr']:.2f}dB\n")
+
+        f.write("\n" + "=" * 78 + "\n")
+        f.write("  END OF REPORT\n")
+        f.write("=" * 78 + "\n")
+
+
+def write_single_demo_report(data, output_dir):
+    """Save single-sample demo results as text report."""
+    path = os.path.join(output_dir, "single_demo_report.txt")
+    with open(path, "w") as f:
+        def w(s):
+            f.write(s + "\n")
+
+        w("=" * 70)
+        w("  Single-Sample Demo — Detailed Report")
+        for key in ["spy_distance", "angle_deg", "fs", "src_pos", "jammer_pos"]:
+            if key in data:
+                w(f"  {key}: {data[key]}")
+        w("=" * 70)
+        w("")
+
+        # SNR table
+        w(f"{'Signal':<35} {'SNR (dB)':>10} {'SegSNR (dB)':>12} {'MFCC dist':>10}")
+        w("-" * 67)
+        for entry in data.get("metrics", []):
+            w(f"{entry['label']:<35} {entry['snr']:>10.2f} "
+              f"{entry['seg_snr']:>12.2f} {entry['mfcc_dist']:>10.3f}")
+
+        w("")
+        w("--- Signal Statistics ---")
+        for entry in data.get("signal_stats", []):
+            w(f"  {entry['label']:<30}  min={entry['min']:+.4f}  "
+              f"max={entry['max']:+.4f}  rms={entry['rms']:.4f}  "
+              f"peak_to_rms={entry['peak_to_rms']:.1f}")
+
+        w("")
+        w("--- Noise Statistics ---")
+        for entry in data.get("noise_stats", []):
+            w(f"  {entry['label']:<30}  rms={entry['rms']:.4f}  "
+              f"peak={entry['peak']:.4f}")
+
+        w("")
+        w("--- Eavesdropper Geometry ---")
+        for entry in data.get("geometry", []):
+            w(f"  {entry['label']:<30}  pos=({entry['pos'][0]:.3f}, {entry['pos'][1]:.3f})"
+              f"  dist={entry['dist']:.3f}m  delay={entry['delay']}samples")
+
+    print(f"Single-demo report -> {path}")
 
 
 # ---------------------------------------------------------------------------
