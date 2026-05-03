@@ -295,9 +295,11 @@ def run_single_demo(s, spy_distance=2.0, angle_deg=15.0, output_dir="results"):
     spec_labels = ["Original Speech", "+ Gaussian (UMJ)",
                    "+ Coherent (MicFrozen)", "+ Adaptive (Ours)"]
 
-    # Also add post-ICA
+    # Also add post-ICA on coherent
     angle_rad = np.deg2rad(angle_deg)
-    ica_result = apply_attack(coherent_mixed, s, "ica", spy_distance, angle_rad)
+    ica_result = apply_attack(mixed["coherent_fixed"], s, "ica",
+                              spy_distance, angle_rad,
+                              method_name="coherent_fixed")
     spec_signals.append(ica_result)
     spec_labels.append("Coherent → ICA denoised")
 
