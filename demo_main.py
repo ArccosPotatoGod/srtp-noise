@@ -438,7 +438,12 @@ def generate_summary_charts(df, output_dir="results"):
     write_summary_report(df, report_path)
     print(f"  [5/5] Summary report -> summary.txt")
 
-    print("\nAll charts generated in:", os.path.abspath(output_dir))
+    # 6. PDF report
+    from src.report import generate_pdf_report
+    pdf_path = os.path.join(output_dir, "report.pdf")
+    generate_pdf_report(df, output_dir, pdf_path)
+
+    print("\nAll results in:", os.path.abspath(output_dir))
 
 
 def _fmt_table(headers, rows, col_widths=None):
