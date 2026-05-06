@@ -48,19 +48,10 @@ from src.visualize import (
 )
 
 # ---------------------------------------------------------------------------
-# Default parameters (from spec Section 4.1)
+# Default parameters (from src/config.py)
 # ---------------------------------------------------------------------------
-FS = 16000
-SPEED_OF_SOUND = 340.0
-SRC_POS = (0.0, 0.0)        # Speaker position
-JAMMER_POS = (0.2, 0.0)     # MicFrozen device position
-REF_MIC_POS = (0.1, 0.0)    # Reference microphone (close to source)
-
-# Experiment matrix (spec Section 7.3)
-DISTANCES = [1.0, 2.0, 3.0, 4.0, 5.0]
-ANGLES = [0, 15, 30, 45]
-METHODS = ["gaussian", "coherent_fixed", "adaptive"]
-ATTACKS = ["none", "bandstop", "bandpass", "ica", "beamforming"]
+from src.config import (FS, SPEED_OF_SOUND, SRC_POS, JAMMER_POS,
+                         DISTANCES, ANGLES, METHODS, ATTACKS)
 
 
 # ---------------------------------------------------------------------------
@@ -117,14 +108,19 @@ def generate_all_noises(s, distance, rng=None):
 
 
 def apply_attack(mixed, s_original, attack_name, distance, angle_rad,
-                 method_name="coherent_fixed"):
+                 method_name="coherent_fixed", rng=None):
     """Apply a single denoising attack to the mixed signal.
 
     Parameters
     ----------
     method_name : str
         Jamming method name, used by ICA to match noise type on second channel.
+    rng : np.random.Generator or None
+        RNG for ICA second channel noise.
     """
+    if rng is None:
+        rng = np.random.default_rng()
+
     if attack_name == "none":
         return mixed
 
@@ -135,30 +131,30 @@ def apply_attack(mixed, s_original, attack_name, distance, angle_rad,
         return apply_bandpass(mixed, FS)
 
     elif attack_name == "ica":
-        # Second channel: slightly different spy position, SAME noise type
+        # Second channel: slightly different spy position, same noise type
         spy2 = (distance * np.cos(angle_rad + 0.1),
                 distance * np.sin(angle_rad + 0.1))
         res2, _ = apply_cancellation(s_original, SRC_POS, JAMMER_POS, spy2, FS)
 
-        rng2 = np.random.default_rng(42)
         if method_name == "gaussian":
-            n2 = generate_gaussian_noise(len(s_original), FS, rng=rng2)
+            n2 = generate_gaussian_noise(len(s_original), FS, rng=rng)
         elif method_name == "adaptive":
-            n2 = adaptive_coherent_noise(s_original, distance, FS, rng=rng2)
+            n2 = adaptive_coherent_noise(s_original, distance, FS, rng=rng)
         else:
-            n2 = generate_coherent_noise(s_original, FS, rng=rng2)
+            n2 = generate_coherent_noise(s_original, FS, rng=rng)
 
         mixed2 = res2 + n2[:len(res2)]
         S_ = ica_denoise(mixed, mixed2)
         return select_speech_component(S_, s_original)
 
     elif attack_name == "beamforming":
-        # 4-mic linear array, 0.05m spacing (spec Section 5.3)
+        # 4-mic linear array, 0.05m spacing, centered on spy position
         mic_spacing = 0.05
+        spy_x = distance * np.cos(angle_rad)
+        spy_y = distance * np.sin(angle_rad)
         delays_samples = []
         for i in range(4):
-            pos = (distance + i * mic_spacing,
-                   distance * np.tan(angle_rad) if angle_rad != 0 else 0)
+            pos = (spy_x + (i - 1.5) * mic_spacing, spy_y)
             d = np.linalg.norm(np.array(pos) - np.array(SRC_POS))
             delays_samples.append(-int(round(d / SPEED_OF_SOUND * FS)))
         # Normalize delays relative to first mic
@@ -234,12 +230,13 @@ def run_single_demo(s, spy_distance=2.0, angle_deg=15.0, output_dir="results"):
     # Also show after-attack results (one attack per method)
     print(f"\n{'After denoising attacks:':<35} {'SNR (dB)':>10} {'SegSNR (dB)':>12}")
     print(f"{'-'*57}")
+    rng_demo = np.random.default_rng(42)
     for method_name in METHODS:
         for att in ["bandstop", "bandpass", "ica", "beamforming"]:
             angle_rad = np.deg2rad(angle_deg)
             processed = apply_attack(mixed[method_name], s, att,
                                      spy_distance, angle_rad,
-                                     method_name=method_name)
+                                     method_name=method_name, rng=rng_demo)
             snr = compute_snr(s, processed)
             seg = compute_segment_snr(s, processed)
             mfcc = compute_mfcc_distance(s, processed, FS)
@@ -299,7 +296,7 @@ def run_single_demo(s, spy_distance=2.0, angle_deg=15.0, output_dir="results"):
     angle_rad = np.deg2rad(angle_deg)
     ica_result = apply_attack(mixed["coherent_fixed"], s, "ica",
                               spy_distance, angle_rad,
-                              method_name="coherent_fixed")
+                              method_name="coherent_fixed", rng=rng_demo)
     spec_signals.append(ica_result)
     spec_labels.append("Coherent → ICA denoised")
 
@@ -335,6 +332,7 @@ def run_batch_experiments(s, output_dir="results"):
     print(f"{'='*60}")
 
     count = 0
+    rng = np.random.default_rng(42)
     for distance in DISTANCES:
         for angle_deg in ANGLES:
             angle_rad = np.deg2rad(angle_deg)
@@ -343,7 +341,6 @@ def run_batch_experiments(s, output_dir="results"):
             residual, s_direct = apply_cancellation(
                 s, SRC_POS, JAMMER_POS, spy_pos, FS)
 
-            rng = np.random.default_rng(42)
             noises = generate_all_noises(s, distance, rng=rng)
 
             for method_name in METHODS:
@@ -353,7 +350,7 @@ def run_batch_experiments(s, output_dir="results"):
                 for attack_name in ATTACKS:
                     processed = apply_attack(
                         mixed, s, attack_name, distance, angle_rad,
-                        method_name=method_name)
+                        method_name=method_name, rng=rng)
 
                     snr_val = compute_snr(s, processed)
                     mfcc_dist = compute_mfcc_distance(s, processed, FS)

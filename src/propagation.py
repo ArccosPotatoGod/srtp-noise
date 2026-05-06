@@ -67,24 +67,22 @@ def fractional_delay(signal, delay_seconds, fs):
     if delay_samples >= n:
         return np.zeros_like(signal)
 
-    # Output sample i came from input time (i - delay_samples)
+    # Output sample i comes from input time (i - delay_samples).
+    # Query the original signal at shifted positions: query positions before
+    # index 0 return left=0 (signal hasn't arrived yet = causal delay).
     t_in = np.arange(n, dtype=np.float64)
-    t_out = t_in - delay_samples
-
-    # Linear interpolation; values before t=0 are zero (causal delay)
-    delayed = np.interp(t_in, t_out, signal, left=0.0, right=0.0)
+    t_query = t_in - delay_samples
+    delayed = np.interp(t_query, t_in, signal, left=0.0, right=0.0)
     return delayed.astype(signal.dtype)
 
 
-def add_mic_noise(signal, fs, noise_floor_db=MIC_NOISE_FLOOR_DB, rng=None):
+def add_mic_noise(signal, noise_floor_db=MIC_NOISE_FLOOR_DB, rng=None):
     """Add microphone self-noise to a captured signal.
 
     Parameters
     ----------
     signal : np.ndarray
         Clean signal captured at microphone.
-    fs : int
-        Sample rate.
     noise_floor_db : float
         Noise floor in dB relative to nominal speech level.
     rng : np.random.Generator or None
@@ -100,48 +98,6 @@ def add_mic_noise(signal, fs, noise_floor_db=MIC_NOISE_FLOOR_DB, rng=None):
     noise_rms = sig_rms * (10 ** (noise_floor_db / 20.0))
     noise = rng.normal(0, noise_rms, len(signal))
     return signal + noise
-
-
-def add_early_reflection(signal, src_pos, mic_pos, fs, coeff=REFLECTION_COEFF):
-    """Add a single ground-floor early reflection.
-
-    Models the first-order reflection off a hard surface (floor at y=-1.5m).
-    The reflected path is longer → later arrival → potential comb filtering.
-
-    Parameters
-    ----------
-    signal : np.ndarray
-        Direct-path signal arriving at mic.
-    src_pos : tuple (x, y)
-    mic_pos : tuple (x, y)
-    fs : int
-    coeff : float
-        Reflection coefficient (0–1), fraction of amplitude reflected.
-
-    Returns
-    -------
-    combined : np.ndarray
-        Direct + reflected signal.
-    """
-    FLOOR_Y = -1.5
-    # Mirror source below floor
-    src_mirror = (src_pos[0], 2 * FLOOR_Y - src_pos[1])
-    mic_mirror = (mic_pos[0], 2 * FLOOR_Y - mic_pos[1])
-
-    # Reflection path length via floor
-    refl_dist_src = compute_distance(src_pos, (src_pos[0], FLOOR_Y)) \
-                    + compute_distance((mic_pos[0], FLOOR_Y), mic_pos)
-
-    # Simpler: use mirror source
-    refl_dist = compute_distance(src_mirror, mic_pos)
-
-    delay_s = refl_dist / SPEED_OF_SOUND
-    refl_atten = 1.0 / (refl_dist + MIN_DIST) * coeff
-
-    refl_signal = fractional_delay(signal, delay_s, fs) * (refl_atten / (1.0 / (compute_distance(src_pos, mic_pos) + MIN_DIST) + 1e-12))
-    # Scale relative to direct: the reflection is added to what arrives at the mic
-
-    return signal + refl_signal * coeff
 
 
 def propagate_signal(signal, src_pos, mic_pos, fs,
@@ -195,6 +151,6 @@ def propagate_signal(signal, src_pos, mic_pos, fs,
 
     # Add microphone self-noise if requested
     if add_noise:
-        propagated = add_mic_noise(propagated, fs, rng=rng)
+        propagated = add_mic_noise(propagated, rng=rng)
 
     return propagated

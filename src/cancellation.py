@@ -34,7 +34,7 @@ def _soft_clip(x, threshold):
     return threshold * np.tanh(x / threshold)
 
 
-def _estimate_spy_position(spy_pos):
+def _estimate_spy_position(spy_pos, rng):
     """Simulate imperfect estimation of spy position.
 
     The jammer uses acoustic ranging/localization to estimate where the
@@ -42,13 +42,13 @@ def _estimate_spy_position(spy_pos):
 
     Returns estimated (x, y) position.
     """
-    x_err = np.random.normal(0, POSITION_EST_ERROR_STD)
-    y_err = np.random.normal(0, POSITION_EST_ERROR_STD)
+    x_err = rng.normal(0, POSITION_EST_ERROR_STD)
+    y_err = rng.normal(0, POSITION_EST_ERROR_STD)
     return (spy_pos[0] + x_err, spy_pos[1] + y_err)
 
 
 def apply_cancellation(s, src_pos, jammer_pos, spy_pos, fs,
-                        max_cancel_db=MAX_CANCELLATION_DB):
+                        max_cancel_db=MAX_CANCELLATION_DB, seed=None):
     """Apply MicFrozen speech cancellation with realistic imperfections.
 
     Signal chain:
@@ -73,6 +73,8 @@ def apply_cancellation(s, src_pos, jammer_pos, spy_pos, fs,
         Sample rate in Hz.
     max_cancel_db : float
         Maximum cancellation ratio in dB (physical ceiling).
+    seed : int or None
+        Seed for reproducible randomness.
 
     Returns
     -------
@@ -81,7 +83,7 @@ def apply_cancellation(s, src_pos, jammer_pos, spy_pos, fs,
     s_direct : np.ndarray
         Direct-path signal at spy (for comparison).
     """
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed)
 
     # ---- 1. Reference microphone at jammer ----
     # Captures delayed speech with mic self-noise + timing jitter
@@ -96,7 +98,7 @@ def apply_cancellation(s, src_pos, jammer_pos, spy_pos, fs,
     d_src_to_spy = compute_distance(src_pos, spy_pos)
     d_jam_to_spy = compute_distance(jammer_pos, spy_pos)
 
-    spy_est = _estimate_spy_position(spy_pos)
+    spy_est = _estimate_spy_position(spy_pos, rng)
     d_src_estimated = compute_distance(src_pos, spy_est)
     d_jam_estimated = compute_distance(jammer_pos, spy_est)
 
@@ -123,16 +125,12 @@ def apply_cancellation(s, src_pos, jammer_pos, spy_pos, fs,
     # ---- 5. Jammer emits cancelling signal (latency-compensated) ----
     # Nominal hardware latency is compensated by advancing the emit.
     # Only residual timing jitter remains as imperfection.
-    rng_jitter_cancel = np.random.default_rng()
     s_cancel = propagate_signal(anti_signal, jammer_pos, spy_pos, fs,
-                                timing_jitter=TIMING_JITTER_STD,
-                                rng=rng_jitter_cancel)
+                                timing_jitter=TIMING_JITTER_STD, rng=rng)
 
     # Direct path from source to spy (also with jitter)
-    rng_jitter_direct = np.random.default_rng()
     s_direct = propagate_signal(s, src_pos, spy_pos, fs,
-                                timing_jitter=TIMING_JITTER_STD,
-                                rng=rng_jitter_direct)
+                                timing_jitter=TIMING_JITTER_STD, rng=rng)
 
     # ---- 6. Superposition with bounded cancellation ----
     # Even in the best case (zero delay mismatch, perfect calibration),

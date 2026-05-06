@@ -10,34 +10,15 @@ import pandas as pd
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm, cm
+from reportlab.lib.units import mm
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
                                  TableStyle, Image, PageBreak, KeepTogether)
 from reportlab.platypus.flowables import HRFlowable
 
-# Configuration constants (keep in sync with demo_main.py)
-DISTANCES = [1.0, 2.0, 3.0, 4.0, 5.0]
-ANGLES = [0, 15, 30, 45]
-METHODS = ["gaussian", "coherent_fixed", "adaptive"]
-ATTACKS = ["none", "bandstop", "bandpass", "ica", "beamforming"]
-FS = 16000
-SRC_POS = (0, 0)
-JAMMER_POS = (0.2, 0)
-
-METHOD_LABELS = {
-    "gaussian": "Gaussian (UMJ)",
-    "coherent_fixed": "Coherent Fixed (MicFrozen)",
-    "adaptive": "Adaptive Coherent (Ours)",
-}
-ATTACK_LABELS = {
-    "none": "No Attack",
-    "bandstop": "Bandstop Filter",
-    "bandpass": "Bandpass Filter",
-    "ica": "ICA (FastICA)",
-    "beamforming": "Beamforming",
-}
+from .config import (DISTANCES, ANGLES, METHODS, ATTACKS,
+                      FS, SRC_POS, JAMMER_POS, METHOD_LABELS, ATTACK_LABELS)
 
 PAGE_W, PAGE_H = A4
 
@@ -274,6 +255,7 @@ def _section_attacks(doc, df):
     baseline = df_noatt.groupby(["distance", "angle", "method"])["snr"].mean()
 
     impact_rows = []
+    delta_by_attack = {}
     for att in [a for a in ATTACKS if a != "none"]:
         sub = df[df["attack"] == att].copy()
         sub["baseline"] = sub.apply(
@@ -287,6 +269,7 @@ def _section_attacks(doc, df):
             f"{sub['delta'].min():+.2f}",
             f"{sub['delta'].max():+.2f}",
         ])
+        delta_by_attack[att] = sub["delta"].mean()
     story.append(_make_table(
         ["Attack", "Mean Δ", "Std Δ", "Min Δ", "Max Δ"],
         impact_rows, col_widths=[55*mm, 28*mm, 28*mm, 28*mm, 28*mm]))
@@ -294,9 +277,9 @@ def _section_attacks(doc, df):
                      "Negative delta = attack made SNR worse.", STYLE_BODY))
     story.append(_spacer())
 
-    # Analysis text
-    bandpass_delta = float(impact_rows[1][1])
-    ica_delta = float(impact_rows[2][1])
+    # Analysis text — use dict lookup, not hardcoded indices
+    bandpass_delta = delta_by_attack.get("bandpass", 0)
+    ica_delta = delta_by_attack.get("ica", 0)
     story.append(_p(
         f"<b>Bandpass filtering is the most effective attack</b> "
         f"(mean Δ = {bandpass_delta:+.1f} dB), recovering significant speech "
