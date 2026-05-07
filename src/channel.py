@@ -11,28 +11,29 @@ class UltrasonicAttenuation:
     """Extra air-absorption attenuation for ultrasonic frequencies.
 
     Models the attenuation difference between audible (< 4 kHz, ~0.001 dB/m)
-    and ultrasonic (~40 kHz, ~1.2–1.5 dB/m per ISO 9613-1).
+    and ultrasonic (~40 kHz, ~1.2–1.5 dB/m per empirical measurements).
+
+    ISO 9613-1 is not valid above ~10 kHz, so we use the empirical
+    attenuation_db_per_m value directly.
     """
 
     def __init__(self, carrier_freq: float = 39000.0,
-                 temperature: float = 20.0, humidity: float = 50.0):
+                 temperature: float = 20.0, humidity: float = 50.0,
+                 attenuation_db_per_m: float = 1.5):
         self.carrier_freq = carrier_freq
         self.temperature = temperature
         self.humidity = humidity
+        self.attenuation_db_per_m = attenuation_db_per_m
         self.alpha = self._compute_alpha()
 
     def _compute_alpha(self) -> float:
-        """ISO 9613-1 atmospheric absorption coefficient (Np/m)."""
-        T = self.temperature + 273.15
-        h = self.humidity
-        f = self.carrier_freq
-        frO = (24.0 + 4.04e4 * h * (0.02 + h) / (0.391 + h)) * 1e-4
-        frN = (T / T) ** (-0.5) * (9.0 + 280.0 * h * np.exp(-4.17 * ((T / T) ** (-1.0 / 3.0) - 1.0)))
-        alpha = (1.84e-11 * (T / 293.15) ** 0.5
-                 + (T / 293.15) ** (-2.5)
-                 * (8.686 * 0.01275 * np.exp(-2239.1 / T) * frO / (frO + f * f / frO)
-                    + 8.686 * 0.1068 * np.exp(-3352.0 / T) * frN / (frN + f * f / frN)))
-        return alpha * f * f * 1e-3  # dB/m → Np/m
+        """Convert dB/m attenuation to Np/m for exponential RIR scaling.
+
+        Field attenuation: factor = exp(-alpha * distance)
+        Equivalent: factor = 10^(-dB_per_m * distance / 20)
+        Therefore: alpha = dB_per_m * ln(10) / 20 = dB_per_m / 8.686
+        """
+        return self.attenuation_db_per_m * np.log(10) / 20.0
 
     def apply(self, rir: np.ndarray, distance: float) -> np.ndarray:
         """Apply exponential ultrasonic attenuation to a RIR.
@@ -61,6 +62,7 @@ class ChannelModule:
             carrier_freq=self.ultrasonic_config.carrier_freq,
             temperature=self.room_config.temperature,
             humidity=self.room_config.humidity,
+            attenuation_db_per_m=self.ultrasonic_config.attenuation_db_per_m,
         )
 
     def compute_rir(self) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:

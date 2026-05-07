@@ -24,6 +24,9 @@ class JammerModule:
         ref = ref * (rms_src / rms_ref)
         s_cancel = self.cancel_strategy.compute(ref)
         n_coherent = self.coherent_strategy.compute(s_src)
+        # Normalize coherent noise to same RMS as speech, then apply system gain
+        rms_noise = float(np.sqrt(np.mean(n_coherent ** 2))) or 1.0
+        n_coherent = n_coherent * (rms_src / rms_noise)
         gain_linear = 10.0 ** (self.config.jammer.system_gain_db / 20.0)
         s_cancel *= gain_linear
         n_coherent *= gain_linear
@@ -33,10 +36,10 @@ class JammerModule:
 class ICancelingStrategy(ABC):
     @abstractmethod
     def compute(self, ref_signal: np.ndarray) -> np.ndarray:
-        pass
+        raise NotImplementedError
 
 
 class ICoherentNoiseStrategy(ABC):
     @abstractmethod
     def compute(self, speech: np.ndarray) -> np.ndarray:
-        pass
+        raise NotImplementedError

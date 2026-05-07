@@ -14,7 +14,7 @@ from src.config import ScenarioConfig, load_config, load_grid_config
 from src.speaker import SpeakerModule
 from src.channel import ChannelModule
 from src.jammer import JammerModule
-from src.spy_mic import SpyMicrophoneModule
+from src.spy_mic import SpyMicrophoneModule, build_sniffer_reference
 from src.attacker import AttackerModule
 from src.evaluator import Evaluator, save_text_report
 from strategies.canceling import create_canceling
@@ -70,6 +70,10 @@ class ExperimentRunner:
                     (new_x, new_y, base_pos[2])
                     for base_pos in self.base_config.spy_mic.positions
                 ]
+            elif key_path == "jammer.coherent_strategy":
+                config.jammer.coherent_strategy = val
+                if val == "off":
+                    config.jammer.canceling_strategy = "off"
             else:
                 parts = key_path.split(".")
                 obj = config
@@ -90,16 +94,28 @@ class ExperimentRunner:
         seed_str = str(sorted(signal_keys.items()))
         return int(hashlib.md5(seed_str.encode()).hexdigest()[:8], 16) % (2 ** 31)
 
-    def run(self) -> None:
+    def run(self, n_runs: int = 1) -> None:
         combinations = self._expand_grid()
         for override in tqdm(combinations, desc="Running experiments"):
             config = self._apply_overrides(override)
             seed = self._seed_from_override(override)
-            metrics = self._run_single(config, seed)
-            metrics.update(override)
-            self.results.append(metrics)
+            if n_runs <= 1:
+                metrics = self._run_single(config, seed)
+                metrics.update(override)
+                self.results.append(metrics)
+            else:
+                # Average metrics over multiple ASR corruption seeds
+                all_metrics = []
+                for run_idx in range(n_runs):
+                    m = self._run_single(config, seed, run_index=run_idx)
+                    all_metrics.append(m)
+                avg = {k: float(np.mean([m[k] for m in all_metrics]))
+                       for k in all_metrics[0]}
+                avg.update(override)
+                self.results.append(avg)
 
-    def _run_single(self, config: ScenarioConfig, seed: int = 0) -> Dict:
+    def _run_single(self, config: ScenarioConfig, seed: int = 0,
+                    run_index: int = 0) -> Dict:
         from scipy.signal import fftconvolve
         rng = np.random.default_rng(seed)
 
@@ -132,16 +148,13 @@ class ExperimentRunner:
                                    config.attacker.denoiser_params)
         asr = create_asr(config.attacker.asr, {"ref_text": ref_text})
         attacker = AttackerModule(denoiser, asr)
-        # Sniffer reference: jammer baseband through ultrasonic RIR to spy position.
-        # Simulates an ultrasonic sniffer co-located with the spy mic that captures
-        # the jammer signal through the same acoustic channel (RIR + nonlinearity).
-        jammer_baseband = s_cancel + n_coherent
-        jammer_rir = ultrasonic_rirs["jammer_to_spy"][0]
-        noise_ref = fftconvolve(jammer_baseband, jammer_rir)[:len(s_src)]
-        noise_ref = nonlinearity.apply(noise_ref)
-        enhanced, hyp_text = attacker.attack(spy_rec, noise_ref=noise_ref)
+        noise_ref = build_sniffer_reference(s_cancel, n_coherent,
+                                           ultrasonic_rirs["jammer_to_spy"][0],
+                                           len(s_src), nonlinearity)
+        enhanced, hyp_text = attacker.attack(spy_rec, noise_ref=noise_ref,
+                                              seed_offset=run_index)
         enh_1d = enhanced[0] if enhanced.ndim > 1 else enhanced
-        raw_hyp = asr.transcribe(spy_1d)
+        raw_hyp = asr.transcribe(spy_1d, seed_offset=run_index)
 
         evaluator = Evaluator(fs=config.sim.fs)
         return evaluator.evaluate(speech_at_spy, spy_1d, enh_1d,
@@ -161,22 +174,30 @@ class ExperimentRunner:
         """Save a comprehensive text report of all results."""
         save_text_report(self.results, path)
 
-    def _group_by(self, key_x, key_y, key_group, key_style):
-        """Group results by strategy & denoiser for per-series plotting."""
+    def _group_by(self, key_x, key_y, key_group, key_style=None):
+        """Group results by strategy & optional denoiser for per-series plotting."""
         from collections import defaultdict
         groups = defaultdict(list)
         for r in self.results:
-            label = f"{r.get(key_group, '?')} | {r.get(key_style, '?')}"
+            if key_style is not None:
+                label = f"{r.get(key_group, '?')} | {r.get(key_style, '?')}"
+            else:
+                label = str(r.get(key_group, '?'))
             groups[label].append((r.get(key_x, 0), r.get(key_y, 0)))
         return groups
 
     def plot_snr_vs_distance(self, path: str) -> None:
+        """Plot raw SNR vs distance grouped by jamming strategy only.
+
+        Raw SNR is measured before any denoiser is applied, so denoiser
+        choice does not affect these values.
+        """
         import matplotlib.pyplot as plt
         if not self.results:
             return
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         groups = self._group_by("spy_mic_distance", "snr_raw",
-                                "jammer.coherent_strategy", "attacker.denoiser")
+                                "jammer.coherent_strategy")
         fig, ax = plt.subplots(figsize=(8, 5))
         markers = ["o", "s", "D", "^", "v"]
         for i, (label, pts) in enumerate(sorted(groups.items())):
@@ -187,20 +208,25 @@ class ExperimentRunner:
         ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
         ax.set_xlabel("Distance (m)")
         ax.set_ylabel("SNR (dB)")
-        ax.set_title("SNR vs Distance")
-        ax.legend(fontsize=7)
+        ax.set_title("SNR vs Distance (raw recording)")
+        ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         fig.savefig(path, dpi=150)
         plt.close(fig)
 
     def plot_cwer_vs_distance(self, path: str) -> None:
+        """Plot raw CWER vs distance grouped by jamming strategy only.
+
+        Raw CWER is measured before any denoiser is applied, so denoiser
+        choice does not affect these values.
+        """
         import matplotlib.pyplot as plt
         if not self.results:
             return
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         groups = self._group_by("spy_mic_distance", "cwer_raw",
-                                "jammer.coherent_strategy", "attacker.denoiser")
+                                "jammer.coherent_strategy")
         fig, ax = plt.subplots(figsize=(8, 5))
         markers = ["o", "s", "D", "^", "v"]
         for i, (label, pts) in enumerate(sorted(groups.items())):
@@ -210,12 +236,382 @@ class ExperimentRunner:
             ax.plot(x, y, marker=markers[i % len(markers)], linestyle="-", label=label)
         ax.set_xlabel("Distance (m)")
         ax.set_ylabel("CWER (%)")
-        ax.set_title("CWER vs Distance")
-        ax.legend(fontsize=7)
+        ax.set_title("CWER vs Distance (raw recording)")
+        ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         fig.savefig(path, dpi=150)
         plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Enhanced-metric plots (post-denoising, grouped by denoiser)
+    # ------------------------------------------------------------------
+
+    def plot_snr_enhanced_vs_distance(self, path: str, strategy: str = "fixed_weight") -> None:
+        """Plot enhanced SNR vs distance for one jamming strategy, grouped by denoiser."""
+        import matplotlib.pyplot as plt
+        if not self.results:
+            return
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        subset = [r for r in self.results if r.get("jammer.coherent_strategy") == strategy]
+        groups = self._group_by("spy_mic_distance", "snr_enhanced", "attacker.denoiser")
+        # Re-group from filtered subset
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for r in subset:
+            groups[r.get("attacker.denoiser", "?")].append(
+                (r.get("spy_mic_distance", 0), r.get("snr_enhanced", 0)))
+        fig, ax = plt.subplots(figsize=(8, 5))
+        markers = ["o", "s", "D", "^", "v", "p"]
+        for i, (label, pts) in enumerate(sorted(groups.items())):
+            pts_sorted = sorted(pts, key=lambda x: x[0])
+            x = [p[0] for p in pts_sorted]
+            y = [p[1] for p in pts_sorted]
+            ax.plot(x, y, marker=markers[i % len(markers)], linestyle="-", label=label)
+        ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
+        ax.set_xlabel("Distance (m)")
+        ax.set_ylabel("SNR (dB)")
+        ax.set_title(f"SNR vs Distance — after denoising ({strategy})")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+
+    def plot_cwer_enhanced_vs_distance(self, path: str, strategy: str = "fixed_weight") -> None:
+        """Plot enhanced CWER vs distance for one jamming strategy, grouped by denoiser."""
+        import matplotlib.pyplot as plt
+        if not self.results:
+            return
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        subset = [r for r in self.results if r.get("jammer.coherent_strategy") == strategy]
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for r in subset:
+            groups[r.get("attacker.denoiser", "?")].append(
+                (r.get("spy_mic_distance", 0), r.get("cwer_enhanced", 0)))
+        fig, ax = plt.subplots(figsize=(8, 5))
+        markers = ["o", "s", "D", "^", "v", "p"]
+        for i, (label, pts) in enumerate(sorted(groups.items())):
+            pts_sorted = sorted(pts, key=lambda x: x[0])
+            x = [p[0] for p in pts_sorted]
+            y = [p[1] for p in pts_sorted]
+            ax.plot(x, y, marker=markers[i % len(markers)], linestyle="-", label=label)
+        ax.set_xlabel("Distance (m)")
+        ax.set_ylabel("CWER (%)")
+        ax.set_title(f"CWER vs Distance — after denoising ({strategy})")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Denoiser comparison bar chart
+    # ------------------------------------------------------------------
+
+    def plot_denoiser_comparison(self, path: str, distance: float = 1.0) -> None:
+        """Grouped bar chart: cwer_enhanced per denoiser, grouped by strategy."""
+        import matplotlib.pyplot as plt
+        if not self.results:
+            return
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        subset = [r for r in self.results
+                  if abs(float(r.get("spy_mic_distance", 0)) - distance) < 0.01]
+        if not subset:
+            return
+
+        strategies = sorted(set(r["jammer.coherent_strategy"] for r in subset))
+        denoisers = sorted(set(r["attacker.denoiser"] for r in subset))
+
+        x = np.arange(len(denoisers))
+        width = 0.8 / len(strategies)
+
+        fig, ax = plt.subplots(figsize=(12, 5))
+        for i, strat in enumerate(strategies):
+            strat_rows = [r for r in subset if r["jammer.coherent_strategy"] == strat]
+            den_map = {r["attacker.denoiser"]: r.get("cwer_enhanced", 0) for r in strat_rows}
+            y = [den_map.get(d, 0) for d in denoisers]
+            bars = ax.bar(x + i * width, y, width, label=strat)
+            # Annotate bars with values
+            for bar, val in zip(bars, y):
+                if val > 0:
+                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
+                            f"{val:.0f}", ha="center", va="bottom", fontsize=7)
+
+        ax.set_xlabel("Denoiser")
+        ax.set_ylabel("CWER (%)")
+        ax.set_title(f"Denoiser Comparison — cwer_enhanced at {distance:.0f} m")
+        ax.set_xticks(x + width * (len(strategies) - 1) / 2)
+        ax.set_xticklabels(denoisers, rotation=30, ha="right")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3, axis="y")
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # CWER scatter: raw vs enhanced
+    # ------------------------------------------------------------------
+
+    def plot_cwer_scatter(self, path: str) -> None:
+        """Scatter plot: cwer_raw vs cwer_enhanced colored by strategy, styled by denoiser."""
+        import matplotlib.pyplot as plt
+        if not self.results:
+            return
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        strategies = sorted(set(r["jammer.coherent_strategy"] for r in self.results))
+        denoisers = sorted(set(r["attacker.denoiser"] for r in self.results))
+        colors = plt.cm.tab10(np.linspace(0, 1, len(strategies)))
+        markers = ["o", "s", "D", "^", "v", "p"]
+
+        fig, ax = plt.subplots(figsize=(9, 7))
+        for si, strat in enumerate(strategies):
+            for di, den in enumerate(denoisers):
+                pts = [(r["cwer_raw"], r["cwer_enhanced"])
+                       for r in self.results
+                       if r.get("jammer.coherent_strategy") == strat
+                       and r.get("attacker.denoiser") == den]
+                if not pts:
+                    continue
+                xs, ys = zip(*pts)
+                label = f"{strat} | {den}" if si == 0 or di == len(denoisers) - 1 else None
+                ax.scatter(xs, ys, c=[colors[si]], marker=markers[di % len(markers)],
+                          alpha=0.7, s=40, label=label if (di == 0) else None)
+
+        ax.plot([0, 100], [0, 100], "k--", alpha=0.3, label="y = x (no change)")
+        ax.set_xlabel("CWER raw (%)")
+        ax.set_ylabel("CWER enhanced (%)")
+        ax.set_title("CWER: Raw vs Enhanced")
+        ax.set_xlim(-2, 105)
+        ax.set_ylim(-2, 105)
+        # Strategy legend
+        from matplotlib.lines import Line2D
+        strategy_handles = [Line2D([0], [0], color=colors[i], lw=2, label=s)
+                           for i, s in enumerate(strategies)]
+        denoiser_handles = [Line2D([0], [0], color="gray", marker=markers[i % len(markers)],
+                                  linestyle="none", label=d)
+                           for i, d in enumerate(denoisers)]
+        leg1 = ax.legend(handles=strategy_handles, title="Strategy", fontsize=7,
+                        loc="upper left")
+        ax.add_artist(leg1)
+        ax.legend(handles=denoiser_handles, title="Denoiser", fontsize=7,
+                 loc="lower right")
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Angle sweep
+    # ------------------------------------------------------------------
+
+    def run_angle_sweep(self, path: str = "results/angle_sweep.png",
+                        distance: float = 2.0, angles: list = None,
+                        strategy: str = "fixed_weight",
+                        denoiser: str = "none") -> None:
+        """CWER vs angle sweep at a fixed distance (paper Fig.11 angle dimension)."""
+        import matplotlib.pyplot as plt
+        if angles is None:
+            angles = [0, 10, 20, 30, 40, 50, 60]
+        config = copy.deepcopy(self.base_config)
+        config.jammer.coherent_strategy = strategy
+        config.attacker.denoiser = denoiser
+
+        cwer_raw_vals = []
+        cwer_enh_vals = []
+        snr_raw_vals = []
+
+        for angle in tqdm(angles, desc="Angle sweep"):
+            src = self.base_config.source.pos
+            base_pos = self.base_config.spy_mic.positions[0]
+            rad = np.radians(angle)
+            new_x = src[0] + distance * np.cos(rad)
+            new_y = src[1] + distance * np.sin(rad)
+            config.spy_mic.positions = [
+                (new_x, new_y, base_pos[2]),
+                (new_x, new_y + 0.15, base_pos[2]),
+            ]
+            seed = hash((distance, angle, strategy, denoiser)) & 0x7FFFFFFF
+            metrics = self._run_single(config, seed)
+            cwer_raw_vals.append(metrics["cwer_raw"])
+            cwer_enh_vals.append(metrics["cwer_enhanced"])
+            snr_raw_vals.append(metrics["snr_raw"])
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        ax1.plot(angles, cwer_raw_vals, "o-", label="CWER raw", color="tab:red")
+        ax1.plot(angles, cwer_enh_vals, "s-", label="CWER enhanced", color="tab:blue")
+        ax1.set_xlabel("Angle (degrees)")
+        ax1.set_ylabel("CWER (%)")
+        ax1.set_title(f"Angle Sweep — {strategy} | {denoiser} @ {distance:.0f} m")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        ax2.plot(angles, snr_raw_vals, "D-", color="tab:orange")
+        ax2.set_xlabel("Angle (degrees)")
+        ax2.set_ylabel("SNR (dB)")
+        ax2.set_title(f"SNR vs Angle @ {distance:.0f} m")
+        ax2.axhline(y=0, color="gray", linestyle="--", alpha=0.3)
+        ax2.grid(True, alpha=0.3)
+
+        fig.tight_layout()
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Pipeline audio-stage visualization
+    # ------------------------------------------------------------------
+
+    def save_pipeline_audio_plots(self, output_dir: str = "results/audio_stages",
+                                  config: ScenarioConfig = None,
+                                  seed: int = 42) -> None:
+        """Run one simulation and save waveform/spectrogram plots for every stage."""
+        import matplotlib.pyplot as plt
+        from scipy.signal import fftconvolve, spectrogram
+
+        if config is None:
+            config = copy.deepcopy(self.base_config)
+        rng = np.random.default_rng(seed)
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+
+        audio_path = config.source.audio_file or "data/sample.wav"
+        spk = SpeakerModule(audio_path, fs=config.sim.fs)
+        s_src = spk.get_signal()
+        fs = config.sim.fs
+        t = np.arange(len(s_src)) / fs
+
+        channel = ChannelModule(config)
+        audible_rirs, ultrasonic_rirs = channel.compute_rir()
+        speech_at_spy = fftconvolve(s_src, audible_rirs["src_to_spy"][0])[:len(s_src)]
+
+        cancel = create_canceling(config.jammer.canceling_strategy, config.jammer.canceling_params)
+        coherent = create_coherent(config.jammer.coherent_strategy, config.jammer.coherent_params, rng)
+        jammer = JammerModule(config, cancel, coherent)
+        ref_rir = audible_rirs["src_to_ref"]
+        ref_sig = fftconvolve(s_src, ref_rir)[:len(s_src)]
+        s_cancel, n_coherent = jammer.generate(s_src, ref_rir)
+
+        nonlinearity = create_nonlinearity(config.spy_mic.nonlinearity, config.spy_mic.nonlinearity_params)
+        spy_mic = SpyMicrophoneModule(audible_rirs, ultrasonic_rirs, nonlinearity)
+        spy_rec = spy_mic.capture(s_src, s_cancel, n_coherent)
+        spy_1d = spy_rec[0] if spy_rec.ndim > 1 else spy_rec
+
+        # Audible & ultrasonic arrivals at spy
+        audible_arrival = fftconvolve(s_src, audible_rirs["src_to_spy"][0])[:len(s_src)]
+        jammer_baseband = s_cancel + n_coherent
+        ultrasonic_arrival = fftconvolve(jammer_baseband, ultrasonic_rirs["jammer_to_spy"][0])[:len(s_src)]
+        ultrasonic_demod = nonlinearity.apply(ultrasonic_arrival)
+
+        denoiser = create_denoiser(config.attacker.denoiser, config.attacker.denoiser_params)
+        asr = create_asr(config.attacker.asr, {"ref_text": spk.get_reference_text()})
+        attacker = AttackerModule(denoiser, asr)
+        noise_ref = build_sniffer_reference(s_cancel, n_coherent,
+                                           ultrasonic_rirs["jammer_to_spy"][0],
+                                           len(s_src), nonlinearity)
+        enhanced, hyp_text = attacker.attack(spy_rec, noise_ref=noise_ref)
+        enh_1d = enhanced[0] if enhanced.ndim > 1 else enhanced
+
+        stages = [
+            ("01_source_speech", s_src, "Source speech s(t)"),
+            ("02_reference_mic", ref_sig, "Reference mic (RIR convolved)"),
+            ("03_cancel_signal", s_cancel, "Cancel signal s_cancel(t)"),
+            ("04_coherent_noise", n_coherent, "Coherent noise n_coherent(t)"),
+            ("05_audible_arrival", audible_arrival, "Audible arrival at spy (linear)"),
+            ("06_ultrasonic_arrival", ultrasonic_arrival, "Ultrasonic arrival at spy"),
+            ("07_ultrasonic_demod", ultrasonic_demod, "Ultrasonic arrival after nonlinear demod"),
+            ("08_spy_recording", spy_1d, "Spy recording (audible + demod ultrasonic)"),
+            ("09_enhanced", enh_1d, f"After denoising ({config.attacker.denoiser})"),
+            ("10_jammer_baseband", jammer_baseband, "Jammer baseband (cancel + noise)"),
+            ("11_noise_reference", noise_ref, "Sniffer noise reference"),
+        ]
+
+        for fname, sig, title in stages:
+            self._save_signal_plot(out, fname, sig, fs, title)
+
+        # Combined overview plot
+        self._save_overview_plot(out, s_src, s_cancel, n_coherent, spy_1d, enh_1d, fs)
+        # Spectrogram comparison
+        self._save_spectrogram_plot(out, s_src, spy_1d, enh_1d, fs)
+
+        print(f"Pipeline audio plots saved to {out}/")
+
+    def _save_signal_plot(self, out_dir, fname, signal, fs, title):
+        """Save a single waveform plot."""
+        import matplotlib.pyplot as plt
+        t = np.arange(len(signal)) / fs
+        fig, ax = plt.subplots(figsize=(10, 2.5))
+        ax.plot(t, signal, linewidth=0.6)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Amplitude")
+        ax.set_title(title)
+        ax.set_xlim(0, t[-1])
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(out_dir / f"{fname}.png", dpi=150)
+        plt.close(fig)
+
+    def _save_overview_plot(self, out_dir, s_src, s_cancel, n_coherent, spy_rec, enhanced, fs):
+        """Save a 3-row overview: source, jammer signals, spy+enhanced."""
+        import matplotlib.pyplot as plt
+        t = np.arange(len(s_src)) / fs
+        fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+
+        axes[0].plot(t, s_src, linewidth=0.5, color="tab:green", label="Source speech")
+        axes[0].set_ylabel("Amplitude")
+        axes[0].set_title("Source Speech s(t)")
+        axes[0].legend(fontsize=7)
+        axes[0].grid(True, alpha=0.3)
+
+        axes[1].plot(t, s_cancel, linewidth=0.5, color="tab:red", alpha=0.7, label="s_cancel")
+        axes[1].plot(t, n_coherent, linewidth=0.5, color="tab:purple", alpha=0.7, label="n_coherent")
+        axes[1].set_ylabel("Amplitude")
+        axes[1].set_title("Jammer Signals")
+        axes[1].legend(fontsize=7)
+        axes[1].grid(True, alpha=0.3)
+
+        axes[2].plot(t, spy_rec, linewidth=0.5, color="tab:orange", alpha=0.7, label="Spy recording")
+        axes[2].plot(t[:len(enhanced)], enhanced[:len(t)], linewidth=0.8, color="tab:blue",
+                    alpha=0.8, label="Enhanced")
+        axes[2].set_xlabel("Time (s)")
+        axes[2].set_ylabel("Amplitude")
+        axes[2].set_title("Spy Recording vs Enhanced")
+        axes[2].legend(fontsize=7)
+        axes[2].grid(True, alpha=0.3)
+
+        fig.tight_layout()
+        fig.savefig(out_dir / "overview.png", dpi=150)
+        plt.close(fig)
+
+    def _save_spectrogram_plot(self, out_dir, s_src, spy_rec, enhanced, fs):
+        """Save spectrogram comparison: source, jammed, enhanced."""
+        import matplotlib.pyplot as plt
+        from scipy.signal import spectrogram
+        fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+
+        for ax, sig, title in [
+            (axes[0], s_src, "Source Speech"),
+            (axes[1], spy_rec, "Spy Recording (jammed)"),
+            (axes[2], enhanced, f"After Denoising"),
+        ]:
+            f, t_spec, Sxx = spectrogram(sig.astype(np.float64), fs, nperseg=512, noverlap=256)
+            im = ax.pcolormesh(t_spec, f[:80], 10 * np.log10(Sxx[:80] + 1e-12),
+                              shading="auto", cmap="inferno")
+            ax.set_ylabel("Freq (Hz)")
+            ax.set_title(title)
+            plt.colorbar(im, ax=ax, label="dB")
+
+        axes[-1].set_xlabel("Time (s)")
+        fig.tight_layout()
+        fig.savefig(out_dir / "spectrograms.png", dpi=150)
+        plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Heatmap (existing)
+    # ------------------------------------------------------------------
 
     def run_coverage_heatmap(self, resolution: int = 10,
                              z: float = 1.5,

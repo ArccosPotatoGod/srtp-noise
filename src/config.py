@@ -104,7 +104,9 @@ class ScenarioConfig:
         def _convert(obj):
             if isinstance(obj, dict):
                 return {k: _convert(v) for k, v in obj.items()}
-            elif isinstance(obj, (list, tuple)):
+            elif isinstance(obj, tuple):
+                return tuple(_convert(x) for x in obj)
+            elif isinstance(obj, list):
                 return [_convert(x) for x in obj]
             elif hasattr(obj, "__dataclass_fields__"):
                 return {k: _convert(v) for k, v in obj.__dict__.items()}

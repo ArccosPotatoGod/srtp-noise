@@ -37,8 +37,11 @@ class Evaluator:
 
 
 def _compute_snr(ref: np.ndarray, est: np.ndarray) -> float:
-    noise = ref[:len(est)] - est[:len(ref)]
-    p_signal = np.sum(ref[:len(est)] ** 2)
+    min_len = min(len(ref), len(est))
+    r = ref[:min_len]
+    e = est[:min_len]
+    noise = r - e
+    p_signal = np.sum(r ** 2)
     p_noise = np.sum(noise ** 2)
     if p_noise < 1e-12:
         return 100.0
@@ -113,22 +116,41 @@ def format_text_report(results: List[Dict], title: str = "MicFrozen Experiment R
                 lines.append(f"  {metric}: min={min(vals):.2f}  max={max(vals):.2f}  "
                            f"mean={np.mean(vals):.2f}  median={np.median(vals):.2f}")
 
-    # Per-strategy grouping
-    strategy_keys = [k for k in non_metric_keys if "strategy" in k.lower() or "denoiser" in k.lower()]
-    if strategy_keys:
+    # Per-strategy breakdown (raw metrics)
+    strategy_key = next((k for k in non_metric_keys if "coherent_strategy" in k.lower()), None)
+    denoiser_key = next((k for k in non_metric_keys if "denoiser" in k.lower()), None)
+    if strategy_key and denoiser_key:
         lines.append("")
-        lines.append("--- Per-Strategy Breakdown ---")
-        for sk in strategy_keys:
-            by_val: Dict[str, List[float]] = {}
-            # Use snr_enhanced for denoiser grouping, snr_raw for jammer strategy
-            metric_key = "snr_enhanced" if "denoiser" in sk.lower() else "snr_raw"
-            for r in results:
-                val = str(r.get(sk, "?"))
-                by_val.setdefault(val, []).append(r.get(metric_key, 0))
-            lines.append(f"  Grouped by {sk}:")
-            for val, snrs in sorted(by_val.items()):
-                lines.append(f"    {val:<24}  mean {metric_key}={np.mean(snrs):.2f} dB  "
-                           f"(n={len(snrs)})")
+        lines.append("--- Per-Strategy × Denoiser Breakdown ---")
+
+        strategies = sorted(set(str(r.get(strategy_key, "?")) for r in results))
+        denoisers = sorted(set(str(r.get(denoiser_key, "?")) for r in results))
+
+        for metric_key, metric_label in [
+            ("cwer_enhanced", "CWER enhanced (%)"),
+            ("snr_enhanced", "SNR enhanced (dB)"),
+            ("cwer_raw", "CWER raw (%)"),
+            ("snr_raw", "SNR raw (dB)"),
+        ]:
+            if metric_key not in keys:
+                continue
+            lines.append(f"\n  [{metric_label}]")
+            col_w = max(max(len(d) for d in denoisers), 10) + 2
+            header = f"  {'Strategy':<24}" + "".join(f"{d:>{col_w}}" for d in denoisers)
+            lines.append(header)
+            lines.append("  " + "-" * (24 + col_w * len(denoisers)))
+            for strat in strategies:
+                row = f"  {strat:<24}"
+                for den in denoisers:
+                    vals = [r[metric_key] for r in results
+                            if str(r.get(strategy_key)) == strat
+                            and str(r.get(denoiser_key)) == den
+                            and isinstance(r.get(metric_key), (int, float))]
+                    if vals:
+                        row += f"{np.mean(vals):{col_w}.1f}"
+                    else:
+                        row += f"{'—':>{col_w}}"
+                lines.append(row)
 
     lines.append("")
     lines.append("=" * 72)

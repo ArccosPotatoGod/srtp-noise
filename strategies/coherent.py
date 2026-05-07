@@ -118,10 +118,19 @@ class BaselineHoppingNoise(ICoherentNoiseStrategy):
         return signal.astype(np.float32)
 
 
+class NoCoherentNoise(ICoherentNoiseStrategy):
+    """Jammer-off baseline — returns silence (no coherent noise)."""
+
+    def compute(self, speech: np.ndarray) -> np.ndarray:
+        return np.zeros(len(speech), dtype=np.float32)
+
+
 def create_coherent(strategy_name: str, params: dict,
                     rng: np.random.Generator = None) -> ICoherentNoiseStrategy:
     rng = rng or np.random.default_rng()
-    if strategy_name == "fixed_weight":
+    if strategy_name == "off":
+        return NoCoherentNoise()
+    elif strategy_name == "fixed_weight":
         return FixedWeightCoherentNoise(
             time_coupling=params.get("time_coupling", True),
             freq_coupling=params.get("freq_coupling", True),

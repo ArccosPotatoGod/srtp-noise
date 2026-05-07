@@ -54,9 +54,13 @@ class ICADenoiser(IDenoiser):
 
 
 class SpectralSubtraction(IDenoiser):
-    """Spectral subtraction — estimate noise spectrum and subtract."""
+    """Spectral subtraction — estimate noise spectrum from sniffer reference.
 
-    def __init__(self, noise_frames: int = 10, alpha: float = 2.0):
+    When a noise_ref is provided (sniffer signal), its spectrum is used as the
+    noise estimate.  Otherwise falls back to the first noise_frames of the input.
+    """
+
+    def __init__(self, noise_frames: int = 10, alpha: float = 1.2):
         self.noise_frames = noise_frames
         self.alpha = alpha
 
@@ -65,15 +69,35 @@ class SpectralSubtraction(IDenoiser):
             audio = audio[0]
         n_fft = 512
         hop = n_fft // 2
-        stft = np.array([np.fft.rfft(audio[i:i + n_fft] * np.hanning(n_fft))
-                         for i in range(0, len(audio) - n_fft, hop)])
-        noise_mag = np.mean(np.abs(stft[:self.noise_frames]), axis=0)
+        pad = n_fft  # eliminate edge artifacts from overlap-add boundaries
+
+        audio_orig_len = len(audio)
+        audio_fp = audio.astype(np.float64)
+        audio_pad = np.pad(audio_fp, (pad, pad + hop), mode="reflect")
+
+        # Use sniffer reference for noise estimate when available
+        if noise_ref is not None:
+            if noise_ref.ndim > 1:
+                noise_ref = noise_ref[0]
+            noise_ref_fp = noise_ref.astype(np.float64)
+            noise_ref_pad = np.pad(noise_ref_fp, (pad, pad + hop), mode="reflect")
+            min_len = min(len(audio_pad), len(noise_ref_pad))
+            noise_stft = np.array([np.fft.rfft(noise_ref_pad[i:i + n_fft] * np.hanning(n_fft))
+                                   for i in range(0, min_len - n_fft, hop)])
+            noise_mag = np.mean(np.abs(noise_stft), axis=0)
+        else:
+            stft_fallback = np.array([np.fft.rfft(audio_pad[i:i + n_fft] * np.hanning(n_fft))
+                                      for i in range(0, len(audio_pad) - n_fft, hop)])
+            noise_mag = np.mean(np.abs(stft_fallback[:self.noise_frames]), axis=0)
+
+        stft = np.array([np.fft.rfft(audio_pad[i:i + n_fft] * np.hanning(n_fft))
+                         for i in range(0, len(audio_pad) - n_fft, hop)])
         mag = np.abs(stft) - self.alpha * noise_mag
         mag = np.maximum(mag, 0.0)
         phase = np.angle(stft)
         enhanced_stft = mag * np.exp(1j * phase)
-        # Overlap-add reconstruction
-        out = np.zeros(len(audio))
+        # Overlap-add reconstruction on padded signal
+        out = np.zeros(len(audio_pad), dtype=np.float64)
         win = np.hanning(n_fft)
         for idx, frame in enumerate(enhanced_stft):
             i = idx * hop
@@ -83,13 +107,21 @@ class SpectralSubtraction(IDenoiser):
             i = idx * hop
             norm[i:i + n_fft] += win ** 2
         out = np.divide(out, norm, where=norm > 1e-12)
+        # Trim padding to recover original-length signal
+        out = out[pad:pad + audio_orig_len]
         return out.astype(np.float32)
 
 
 class BandstopFilter(IDenoiser):
-    """Butterworth bandstop filter to suppress known jamming band."""
+    """Adaptive bandstop / multi-notch filter for jamming suppression.
 
-    def __init__(self, f_low: float = 300.0, f_high: float = 3500.0,
+    Uses a narrow notch (default 1000-2000 Hz) to suppress jammer energy
+    while preserving most of the speech band.  In the equivalent-baseband
+    simulation there is no ultrasonic carrier, so wide bandstop would
+    also remove speech.  A narrow notch provides a meaningful trade-off.
+    """
+
+    def __init__(self, f_low: float = 1000.0, f_high: float = 2000.0,
                  fs: int = 16000, order: int = 4):
         self.f_low = f_low
         self.f_high = f_high
@@ -111,7 +143,7 @@ class DelaySumBeamformer(IDenoiser):
     """Delay-and-sum beamforming (multi-channel, TDOA-based)."""
 
     def __init__(self, target_angle: float = 0.0, fs: int = 16000,
-                 mic_spacing: float = 0.05, speed_of_sound: float = 343.0):
+                 mic_spacing: float = 0.15, speed_of_sound: float = 343.0):
         self.target_angle = target_angle
         self.fs = fs
         self.mic_spacing = mic_spacing

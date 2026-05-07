@@ -9,7 +9,7 @@ from src.config import load_config
 from src.speaker import SpeakerModule
 from src.channel import ChannelModule
 from src.jammer import JammerModule
-from src.spy_mic import SpyMicrophoneModule
+from src.spy_mic import SpyMicrophoneModule, build_sniffer_reference
 from src.attacker import AttackerModule
 from src.evaluator import Evaluator
 from src.report import format_metrics_table
@@ -58,10 +58,9 @@ def run_scenario(config, rng, jammer_on=True):
     asr = create_asr(config.attacker.asr, {"ref_text": ref_text})
     attacker = AttackerModule(denoiser, asr)
     # Sniffer reference: jammer baseband through ultrasonic RIR to spy position
-    jammer_baseband = s_cancel + n_coherent
-    jammer_rir = ultrasonic_rirs["jammer_to_spy"][0]
-    noise_ref = fftconvolve(jammer_baseband, jammer_rir)[:len(s_src)]
-    noise_ref = nonlinearity.apply(noise_ref)
+    noise_ref = build_sniffer_reference(s_cancel, n_coherent,
+                                        ultrasonic_rirs["jammer_to_spy"][0],
+                                        len(s_src), nonlinearity)
     enhanced, hyp_text = attacker.attack(spy_rec, noise_ref=noise_ref)
 
     # SNR: speech power / jamming residual power (use first channel)
@@ -97,6 +96,8 @@ def main():
     parser = argparse.ArgumentParser(description="MicFrozen single-run simulation")
     parser.add_argument("--config", default="configs/base.yaml")
     parser.add_argument("--audio", default=None)
+    parser.add_argument("--export-audio", action="store_true",
+                        help="Export waveform & spectrogram plots for all pipeline stages")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -145,6 +146,13 @@ def main():
     save_text_report(results, "results/single_report.txt",
                      title="MicFrozen Single-Run Report")
     print("\nText report saved to results/single_report.txt")
+
+    if args.export_audio:
+        from runner import ExperimentRunner
+        runner = ExperimentRunner(args.config)
+        runner.save_pipeline_audio_plots(output_dir="results/audio_stages",
+                                         config=config, seed=42)
+        print("Pipeline audio plots saved to results/audio_stages/")
 
 
 if __name__ == "__main__":

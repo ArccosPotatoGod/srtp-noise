@@ -63,21 +63,34 @@ class GoogleSTT(IASREngine):
 
 
 class DummyASR(IASREngine):
-    """For pipeline testing: reads audio energy to simulate ASR behavior.
+    """For pipeline testing: uses frame energy variance to simulate ASR.
 
-    If audio has significant energy (SNR > threshold), returns the
-    reference text. Otherwise returns empty string, simulating
-    failed recognition.
+    Speech has alternating loud/quiet frames → high energy variance.
+    Steady noise (jamming) flattens the envelope → low energy variance.
+    When variance ratio drops below threshold, recognition is treated
+    as failed.
     """
 
-    def __init__(self, ref_text: str = ""):
+    def __init__(self, ref_text: str = "", fs: int = 16000,
+                 variance_threshold: float = 0.15):
         self.ref_text = ref_text
-        self._energy_threshold = 0.01
+        self.fs = fs
+        self._variance_threshold = variance_threshold
 
     def transcribe(self, audio: np.ndarray) -> str:
-        # Simulate ASR: if signal is strong enough, "recognize" reference
-        rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
-        if rms > self._energy_threshold:
+        sig = audio.astype(np.float64)
+        if sig.ndim > 1:
+            sig = sig[0]
+        frame_len = int(0.025 * self.fs)
+        n_frames = max(len(sig) // frame_len, 4)
+        frame_len = len(sig) // n_frames
+        frame_rms = np.array([
+            np.sqrt(np.mean(sig[i * frame_len:(i + 1) * frame_len] ** 2))
+            for i in range(n_frames)
+        ])
+        mean_rms = np.mean(frame_rms) + 1e-12
+        normalized_variance = float(np.var(frame_rms) / mean_rms)
+        if normalized_variance > self._variance_threshold:
             return self.ref_text
         return ""
 
@@ -85,66 +98,85 @@ class DummyASR(IASREngine):
 class QualityASR(IASREngine):
     """SNR-driven simulated ASR — maps signal quality to recognition accuracy.
 
-    Uses short-time energy variance (speech has clear onsets/offsets, noise
-    is steady) as a proxy for speech quality, then maps to CWER via a
-    logistic curve calibrated to typical ASR performance.
+    Uses envelope dynamics (frame-to-frame energy variation) as the primary
+    quality indicator.  Speech has alternating loud/quiet frames (dyn ≈ 0.3–0.7);
+    steady noise flattens the envelope (dyn ≈ 0.01–0.1).  A secondary RMS
+    elevation penalty handles cases where additive noise inflates overall power.
     """
 
     def __init__(self, ref_text: str = "", fs: int = 16000,
-                 center_snr: float = 0.0, width: float = 6.0):
+                 center_snr: float = 3.0, width: float = 4.0):
         self.ref_text = ref_text
         self.fs = fs
         self.center_snr = center_snr
         self.width = width
 
     def _estimate_quality(self, audio: np.ndarray) -> float:
-        """Returns a pseudo-SNR estimate from unsupervised features.
-
-        High value = likely intelligible speech; low value = likely noise.
-        Uses the variance of short-time energy (speech has high variance).
-        """
         sig = audio.astype(np.float64)
         if sig.ndim > 1:
             sig = sig[0]
+
+        # Frame-level envelope dynamics — primary quality indicator
         frame_len = int(0.025 * self.fs)
         n_frames = max(len(sig) // frame_len, 4)
         frame_len = len(sig) // n_frames
-        rms = np.array([
+        frame_rms = np.array([
             np.sqrt(np.mean(sig[i * frame_len:(i + 1) * frame_len] ** 2))
             for i in range(n_frames)
         ])
-        mean_rms = np.mean(rms) + 1e-12
-        # Normalized variance + spectral flatness proxy
-        energy_var = float(np.std(rms) / mean_rms)
-        # Map to pseudo-SNR: typical speech has var/mean ~0.3-1.0
-        pseudo_snr = 20.0 * np.log10(energy_var + 0.01) + 15.0
-        return float(np.clip(pseudo_snr, -30.0, 40.0))
+        mean_frame_rms = np.mean(frame_rms) + 1e-12
+        envelope_dynamics = float(np.std(frame_rms) / mean_frame_rms)
+
+        # Dynamics-based quality: dyn ≈ 0.5 = clean, dyn ≈ 0.05 = noise-dominated
+        quality_dyn = envelope_dynamics * 30.0 - 2.5
+
+        # RMS elevation penalty (secondary): excessive power suggests additive noise
+        rms_total = float(np.sqrt(np.mean(sig ** 2))) + 1e-12
+        rms_elevation_db = 20.0 * np.log10(rms_total / 0.5 + 1e-12)
+        quality_rms = -0.3 * max(0.0, rms_elevation_db - 3.0)
+
+        pseudo_snr = quality_dyn + quality_rms
+        return float(np.clip(pseudo_snr, -20.0, 25.0))
 
     def _pseudo_snr_to_cwer(self, pseudo_snr: float) -> float:
         """Logistic mapping from pseudo-SNR to CWER (0–100%)."""
         return 100.0 / (1.0 + np.exp((pseudo_snr - self.center_snr) / self.width))
 
     def _corrupt_text(self, text: str, cwer: float, rng: np.random.Generator) -> str:
-        """Randomly drop/replace words to achieve target CWER."""
+        """Probabilistically corrupt each word to approximate target CWER.
+
+        Each word is independently corrupted with probability cwer/100,
+        avoiding the coarse quantization of a fixed error count.
+        """
         if not text.strip():
             return ""
         words = text.strip().split()
-        n_err = max(1, int(round(cwer / 100.0 * len(words))))
-        indices = rng.choice(len(words), size=min(n_err, len(words)), replace=False)
+        prob = cwer / 100.0
         result = []
-        for i, w in enumerate(words):
-            if i in indices:
+        for w in words:
+            if rng.random() < prob:
                 result.append("[???]")
             else:
                 result.append(w)
+        # If cwer > 0 but nothing got corrupted, force at least one error
+        if cwer > 0.0 and all(r == w for r, w in zip(result, words)):
+            idx = rng.integers(0, len(words))
+            result[idx] = "[???]"
         return " ".join(result)
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, seed_offset: int = 0) -> str:
         quality = self._estimate_quality(audio)
         cwer = self._pseudo_snr_to_cwer(quality)
-        rng = np.random.default_rng(
-            int(np.sum(audio.astype(np.float64))) & 0x7FFFFFFF
-        )
+        # Deterministic seed from frame-level energy statistics (robust to DC offset)
+        frame_len = int(0.025 * self.fs)
+        n_frames = max(len(audio) // frame_len, 4)
+        frame_len_actual = len(audio) // n_frames
+        frame_energies = np.array([
+            np.mean(audio[i * frame_len_actual:(i + 1) * frame_len_actual] ** 2)
+            for i in range(n_frames)
+        ])
+        seed = (int(np.sum(frame_energies * 1e6)) + seed_offset) & 0x7FFFFFFF
+        rng = np.random.default_rng(seed)
         return self._corrupt_text(self.ref_text, cwer, rng)
 
 
@@ -161,7 +193,7 @@ def create_asr(name: str, params: dict) -> IASREngine:
         return QualityASR(
             ref_text=params.get("ref_text", ""),
             fs=params.get("fs", 16000),
-            center_snr=params.get("center_snr", 0.0),
-            width=params.get("width", 6.0),
+            center_snr=params.get("center_snr", 5.0),
+            width=params.get("width", 2.5),
         )
     raise ValueError(f"Unknown ASR engine: {name}")

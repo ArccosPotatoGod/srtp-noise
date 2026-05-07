@@ -18,7 +18,7 @@ jammer:
   ref_mic_pos: [1.10, 2.5, 1.5]
   canceling_strategy: "phase_inversion"
   coherent_strategy: "fixed_weight"
-  system_gain_db: 36.0
+  system_gain_db: 20.0
   canceling_params:
     gain: 1.0
     precompensate: true

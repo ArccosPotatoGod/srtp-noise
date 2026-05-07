@@ -38,14 +38,21 @@ class AdaptiveFilterCanceling(ICancelingStrategy):
         s_cancel = np.zeros(T, dtype=np.float32)
 
         for n in range(self.n_taps, T):
-            x = ref_signal[n - self.n_taps:n][::-1]
+            x = ref_signal[n - self.n_taps + 1:n + 1][::-1]
             y = np.dot(w, x)
+            s_cancel[n] = y
             e = -y  # desired = 0 (perfect cancellation)
             norm = np.dot(x, x) + self.delta
             w += self.mu / norm * e * x
-            s_cancel[n] = np.dot(w, ref_signal[max(0, n - self.n_taps + 1):n + 1][::-1])
 
         return s_cancel
+
+
+class PassthroughCanceling(ICancelingStrategy):
+    """Jammer-off — returns silence (no cancel signal)."""
+
+    def compute(self, ref_signal: np.ndarray) -> np.ndarray:
+        return np.zeros(len(ref_signal), dtype=np.float32)
 
 
 def create_canceling(strategy_name: str, params: dict) -> ICancelingStrategy:
@@ -60,4 +67,6 @@ def create_canceling(strategy_name: str, params: dict) -> ICancelingStrategy:
             mu=params.get("mu", 0.01),
             delta=params.get("delta", 1e-6),
         )
+    elif strategy_name == "off":
+        return PassthroughCanceling()
     raise ValueError(f"Unknown canceling strategy: {strategy_name}")

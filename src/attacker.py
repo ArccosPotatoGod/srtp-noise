@@ -14,19 +14,20 @@ class AttackerModule:
         self.asr = asr
 
     def attack(self, recording: np.ndarray,
-               noise_ref: np.ndarray = None) -> Tuple[np.ndarray, str]:
+               noise_ref: np.ndarray = None,
+               seed_offset: int = 0) -> Tuple[np.ndarray, str]:
         enhanced = self.denoiser.denoise(recording, noise_ref=noise_ref)
-        transcription = self.asr.transcribe(enhanced)
+        transcription = self.asr.transcribe(enhanced, seed_offset=seed_offset)
         return enhanced.astype(np.float32), transcription
 
 
 class IDenoiser(ABC):
     @abstractmethod
     def denoise(self, audio: np.ndarray, noise_ref: np.ndarray = None) -> np.ndarray:
-        pass
+        raise NotImplementedError
 
 
 class IASREngine(ABC):
     @abstractmethod
     def transcribe(self, audio: np.ndarray) -> str:
-        pass
+        raise NotImplementedError

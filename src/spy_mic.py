@@ -10,6 +10,21 @@ import numpy as np
 from scipy.signal import fftconvolve
 
 
+def build_sniffer_reference(s_cancel: np.ndarray, n_coherent: np.ndarray,
+                            ultrasonic_rir: np.ndarray, signal_len: int,
+                            nonlinearity: "INonlinearityModel") -> np.ndarray:
+    """Construct the sniffer reference signal for adaptive noise filtering.
+
+    Simulates an ultrasonic sniffer co-located with the spy mic:
+    jammer baseband → ultrasonic RIR → nonlinear demodulation.
+
+    Returns the demodulated baseband as the noise reference for NLMS ANF.
+    """
+    jammer_baseband = s_cancel + n_coherent
+    ref = fftconvolve(jammer_baseband, ultrasonic_rir)[:signal_len]
+    return nonlinearity.apply(ref)
+
+
 class SpyMicrophoneModule:
     """Simulates a spy microphone with separated audible/ultrasonic paths."""
 
