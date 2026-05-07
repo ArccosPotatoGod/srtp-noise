@@ -1,0 +1,47 @@
+sim:
+  fs: 16000
+  duration: null
+
+room:
+  dim: [6.0, 5.0, 3.0]
+  rt60: 0.3
+  temperature: 20.0
+  humidity: 50.0
+
+source:
+  pos: [1.0, 2.5, 1.5]
+  audio_dataset: "librispeech"
+  audio_file: null
+
+jammer:
+  pos_spk: [1.2, 2.5, 1.5]
+  ref_mic_pos: [1.05, 2.5, 1.5]
+  canceling_strategy: "phase_inversion"
+  coherent_strategy: "fixed_weight"
+  system_gain_db: 36.0
+  canceling_params:
+    gain: 1.0
+    precompensate: true
+  coherent_params:
+    time_coupling: true
+    freq_coupling: true
+    mixing_dim: 3
+
+spy_mic:
+  positions:
+    - [4.0, 2.5, 1.5]
+    - [4.05, 2.5, 1.5]     # second mic for multi-channel ICA
+  nonlinearity: "polynomial"
+  nonlinearity_params:
+    coeff: [1.0, 0.1, 0.0]
+
+attacker:
+  denoiser: "ica"
+  asr: "dummy"
+  denoiser_params:
+    n_channels: 4
+
+ultrasonic:
+  carrier_freq: 39000
+  attenuation_db_per_m: 1.5
+  apply_to_rir: true

@@ -1,1 +1,1 @@
-"""MicFrozen simulation modules."""
+"""Core simulation modules for MicFrozen."""

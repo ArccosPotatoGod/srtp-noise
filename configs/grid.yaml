@@ -1,0 +1,4 @@
+grid:
+  spy_mic_distance: [1.0, 2.0, 3.0, 5.0]
+  jammer.coherent_strategy: ["fixed_weight", "gaussian_baseline"]
+  attacker.denoiser: ["ica", "none"]
