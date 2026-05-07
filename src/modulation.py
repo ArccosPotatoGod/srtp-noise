@@ -19,12 +19,12 @@ def ultrasonic_modulate(baseband: np.ndarray, fc: float, fs: float) -> np.ndarra
     return baseband * carrier
 
 
-def precompensate_cancel(ref_signal: np.ndarray) -> np.ndarray:
+def precompensate_cancel(ref_signal: np.ndarray, gain: float = 1.0) -> np.ndarray:
     """Apply pre-compensation per Eq.9 of the paper.
 
-    n(t) = -ŝ(t) - 0.5 * ŝ²(t)
+    n(t) = -gain * ŝ(t) - 0.5 * gain² * ŝ²(t)
 
     When this signal passes through microphone nonlinearity
     y = A1*x + A2*x², the baseband output is -ŝ(t) + higher-order residues.
     """
-    return -ref_signal - 0.5 * ref_signal ** 2
+    return -gain * ref_signal - 0.5 * gain ** 2 * ref_signal ** 2

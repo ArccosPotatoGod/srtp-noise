@@ -106,6 +106,7 @@ jammer:
   ref_mic_pos: [1.05, 2.5, 1.5]  # 参考麦克风位置 (m)，距声源约 20cm
   canceling_strategy: "phase_inversion"
   coherent_strategy: "fixed_weight"
+  system_gain_db: 36.0          # 校准增益 — 补偿超声频段衰减与基带仿真差异
   canceling_params:
     gain: 1.0                 # 相位翻转增益
     precompensate: true       # 是否启用预补偿 n(t) = -ŝ(t) - 0.5ŝ²(t)
@@ -249,9 +250,17 @@ class JammerModule:
         n_coherent : np.ndarray 相干噪声（基带）
         """
         ref = fftconvolve(s_src, ref_rir)[:len(s_src)]
+        # 参考信号RMS归一化 — 补偿近场RIR增益
+        rms_src = sqrt(mean(s_src²)) or 1.0
+        rms_ref = sqrt(mean(ref²)) or 1.0
+        ref = ref * (rms_src / rms_ref)
         s_cancel = self.cancel_strategy.compute(ref)
         n_coherent = self.coherent_strategy.compute(s_src)
-        return s_cancel, n_coherent
+        # 应用系统校准增益 (补偿超声衰减、基带仿真差异)
+        gain_linear = 10 ** (system_gain_db / 20)
+        s_cancel *= gain_linear
+        n_coherent *= gain_linear
+        return s_cancel.astype(np.float32), n_coherent.astype(np.float32)
 ```
 
 #### 3.4.1 抵消策略接口
@@ -269,7 +278,7 @@ class ICancelingStrategy(ABC):
 -   `PhaseInversionCanceling`：`s_cancel = -gain * ref_signal`。
     启用 `precompensate` 时，按照论文 Eq.9 执行预补偿：
     ```
-    s_cancel = -ref_signal - 0.5 * ref_signal^2
+    s_cancel = -gain * ref_signal - 0.5 * gain² * ref_signal²
     ```
     预补偿抵消了非线性解调过程中产生的 ŝ²(t) 项，使解调后的基带残留仅为高阶小量 (0.5ŝ³ + 0.125ŝ⁴)。
 

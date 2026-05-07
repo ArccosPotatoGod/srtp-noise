@@ -15,7 +15,7 @@ source:
 
 jammer:
   pos_spk: [1.2, 2.5, 1.5]
-  ref_mic_pos: [1.05, 2.5, 1.5]
+  ref_mic_pos: [1.10, 2.5, 1.5]
   canceling_strategy: "phase_inversion"
   coherent_strategy: "fixed_weight"
   system_gain_db: 36.0
@@ -30,16 +30,16 @@ jammer:
 spy_mic:
   positions:
     - [4.0, 2.5, 1.5]
-    - [4.05, 2.5, 1.5]     # second mic for multi-channel ICA
+    - [4.0, 2.65, 1.5]    # second mic for multi-channel ICA (15 cm y-spacing)
   nonlinearity: "polynomial"
   nonlinearity_params:
     coeff: [1.0, 0.1, 0.0]
 
 attacker:
   denoiser: "ica"
-  asr: "dummy"
-  denoiser_params:
-    n_channels: 4
+  asr: "quality"
+  denoiser_params: {}
+    # n_channels auto-detected from number of spy mics
 
 ultrasonic:
   carrier_freq: 39000

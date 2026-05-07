@@ -1,4 +1,14 @@
+# Parameter grid for batch experiments.
+# Each key is a dot-separated path into ScenarioConfig.
+# Special keys: spy_mic_distance, spy_mic_angle (handled by _apply_overrides).
+#
+# For angular sweep (paper Fig.11), replace with:
+#   spy_mic_angle: [0, 15, 30, 45, 60]
+#   spy_mic_distance: [3.0]
+#   jammer.coherent_strategy: ["fixed_weight", "gaussian_baseline"]
+#   attacker.denoiser: ["ica", "none"]
+
 grid:
   spy_mic_distance: [1.0, 2.0, 3.0, 5.0]
-  jammer.coherent_strategy: ["fixed_weight", "gaussian_baseline"]
-  attacker.denoiser: ["ica", "none"]
+  jammer.coherent_strategy: ["fixed_weight", "gaussian_baseline", "sweeping_baseline", "hopping_baseline"]
+  attacker.denoiser: ["ica", "spectral_subtraction", "bandstop", "beamforming", "adaptive_noise_filter", "none"]

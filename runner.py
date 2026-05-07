@@ -2,6 +2,7 @@
 
 import copy
 import csv
+import hashlib
 import itertools
 from pathlib import Path
 from typing import Any, Dict, List
@@ -15,7 +16,7 @@ from src.channel import ChannelModule
 from src.jammer import JammerModule
 from src.spy_mic import SpyMicrophoneModule
 from src.attacker import AttackerModule
-from src.evaluator import Evaluator
+from src.evaluator import Evaluator, save_text_report
 from strategies.canceling import create_canceling
 from strategies.coherent import create_coherent
 from strategies.denoiser import create_denoiser
@@ -48,11 +49,12 @@ class ExperimentRunner:
         config = copy.deepcopy(self.base_config)
         for key_path, val in override.items():
             if key_path == "spy_mic_distance":
-                # Set absolute distance from source along x-axis
+                # Set primary spy mic at specified distance along x-axis.
+                # Add a second mic offset in y (15 cm) for multi-channel ICA/BF.
                 src = self.base_config.source.pos
-                config.spy_mic.positions = [
-                    (src[0] + float(val), src[1], src[2])
-                ]
+                primary = (src[0] + float(val), src[1], src[2])
+                secondary = (primary[0], primary[1] + 0.15, primary[2])
+                config.spy_mic.positions = [primary, secondary]
             elif key_path == "spy_mic_angle":
                 # Rotate spy mic around source at fixed distance
                 import math
@@ -76,16 +78,31 @@ class ExperimentRunner:
                 setattr(obj, parts[-1], val)
         return config
 
+    def _seed_from_override(self, override: Dict) -> int:
+        """Deterministic seed from signal-generation params only.
+
+        Excludes post-processing keys (attacker.*) so that the same physical
+        scenario always produces the same spy recording regardless of which
+        denoiser/ASR is tested later.
+        """
+        signal_keys = {k: v for k, v in override.items()
+                       if not k.startswith("attacker.")}
+        seed_str = str(sorted(signal_keys.items()))
+        return int(hashlib.md5(seed_str.encode()).hexdigest()[:8], 16) % (2 ** 31)
+
     def run(self) -> None:
         combinations = self._expand_grid()
         for override in tqdm(combinations, desc="Running experiments"):
             config = self._apply_overrides(override)
-            metrics = self._run_single(config)
+            seed = self._seed_from_override(override)
+            metrics = self._run_single(config, seed)
             metrics.update(override)
             self.results.append(metrics)
 
-    def _run_single(self, config: ScenarioConfig) -> Dict:
+    def _run_single(self, config: ScenarioConfig, seed: int = 0) -> Dict:
         from scipy.signal import fftconvolve
+        rng = np.random.default_rng(seed)
+
         audio_path = config.source.audio_file or "data/sample.wav"
         spk = SpeakerModule(audio_path, fs=config.sim.fs)
         s_src = spk.get_signal()
@@ -100,7 +117,7 @@ class ExperimentRunner:
         cancel = create_canceling(config.jammer.canceling_strategy,
                                   config.jammer.canceling_params)
         coherent = create_coherent(config.jammer.coherent_strategy,
-                                   config.jammer.coherent_params, self.rng)
+                                   config.jammer.coherent_params, rng)
         jammer = JammerModule(config, cancel, coherent)
         s_cancel, n_coherent = jammer.generate(s_src, audible_rirs["src_to_ref"])
 
@@ -108,36 +125,27 @@ class ExperimentRunner:
                                            config.spy_mic.nonlinearity_params)
         spy_mic = SpyMicrophoneModule(audible_rirs, ultrasonic_rirs, nonlinearity)
         spy_rec = spy_mic.capture(s_src, s_cancel, n_coherent)
+        # Use first channel for single-channel SNR/CWER metrics
+        spy_1d = spy_rec[0] if spy_rec.ndim > 1 else spy_rec
 
         denoiser = create_denoiser(config.attacker.denoiser,
                                    config.attacker.denoiser_params)
         asr = create_asr(config.attacker.asr, {"ref_text": ref_text})
         attacker = AttackerModule(denoiser, asr)
-        enhanced, hyp_text = attacker.attack(spy_rec)
+        # Sniffer reference: jammer baseband through ultrasonic RIR to spy position.
+        # Simulates an ultrasonic sniffer co-located with the spy mic that captures
+        # the jammer signal through the same acoustic channel (RIR + nonlinearity).
+        jammer_baseband = s_cancel + n_coherent
+        jammer_rir = ultrasonic_rirs["jammer_to_spy"][0]
+        noise_ref = fftconvolve(jammer_baseband, jammer_rir)[:len(s_src)]
+        noise_ref = nonlinearity.apply(noise_ref)
+        enhanced, hyp_text = attacker.attack(spy_rec, noise_ref=noise_ref)
+        enh_1d = enhanced[0] if enhanced.ndim > 1 else enhanced
+        raw_hyp = asr.transcribe(spy_1d)
 
-        # SNR = speech power / jamming power
-        min_len = min(len(speech_at_spy), len(spy_rec))
-        jamming_residual = spy_rec[:min_len] - speech_at_spy[:min_len]
-        p_speech = float(np.sum(speech_at_spy[:min_len] ** 2))
-        p_jam = float(np.sum(jamming_residual ** 2))
-        snr_raw = 10.0 * np.log10(p_speech / max(p_jam, 1e-12))
-
-        min_len_e = min(len(speech_at_spy), len(enhanced))
-        jamming_after = enhanced[:min_len_e] - speech_at_spy[:min_len_e]
-        p_jam_enh = float(np.sum(jamming_after ** 2))
-        snr_enhanced = 10.0 * np.log10(p_speech / max(p_jam_enh, 1e-12))
-
-        raw_hyp = asr.transcribe(spy_rec)
-        from src.evaluator import _compute_cwer
-        cwer_raw = _compute_cwer(ref_text, raw_hyp)
-        cwer_enhanced = _compute_cwer(ref_text, hyp_text)
-
-        return {
-            "snr_raw": snr_raw,
-            "snr_enhanced": snr_enhanced,
-            "cwer_raw": cwer_raw,
-            "cwer_enhanced": cwer_enhanced,
-        }
+        evaluator = Evaluator(fs=config.sim.fs)
+        return evaluator.evaluate(speech_at_spy, spy_1d, enh_1d,
+                                  ref_text, raw_hyp, hyp_text)
 
     def export_results(self, path: str) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -148,6 +156,10 @@ class ExperimentRunner:
             writer = csv.DictWriter(f, fieldnames=keys)
             writer.writeheader()
             writer.writerows(self.results)
+
+    def export_text_report(self, path: str) -> None:
+        """Save a comprehensive text report of all results."""
+        save_text_report(self.results, path)
 
     def _group_by(self, key_x, key_y, key_group, key_style):
         """Group results by strategy & denoiser for per-series plotting."""
@@ -202,5 +214,56 @@ class ExperimentRunner:
         ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+
+    def run_coverage_heatmap(self, resolution: int = 10,
+                             z: float = 1.5,
+                             strategy: str = "fixed_weight",
+                             denoiser: str = "none",
+                             path: str = "results/heatmap.png") -> None:
+        """2D spatial sweep: scan spy mic across the room x-y plane.
+
+        Corresponds to the coverage heatmap in paper Fig.11.
+        """
+        import matplotlib.pyplot as plt
+
+        room = self.base_config.room
+        src = self.base_config.source.pos
+        xs = np.linspace(0.5, room.dim[0] - 0.5, resolution)
+        ys = np.linspace(0.5, room.dim[1] - 0.5, resolution)
+        snr_grid = np.zeros((resolution, resolution))
+
+        config = copy.deepcopy(self.base_config)
+        config.jammer.coherent_strategy = strategy
+        config.attacker.denoiser = denoiser
+
+        total = resolution * resolution
+        for i, spy_x in enumerate(tqdm(xs, desc="Heatmap X")):
+            for j, spy_y in enumerate(ys):
+                config.spy_mic.positions = [
+                    (float(spy_x), float(spy_y), z),
+                    (float(spy_x), float(spy_y) + 0.15, z),
+                ]
+                seed = hash((spy_x, spy_y, strategy, denoiser)) & 0x7FFFFFFF
+                metrics = self._run_single(config, seed)
+                snr_grid[j, i] = metrics["snr_raw"]
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        im = ax.pcolormesh(xs, ys, snr_grid, shading="auto", cmap="RdYlGn")
+        ax.scatter(src[0], src[1], marker="*", s=200, color="black",
+                   label="Source")
+        ax.scatter(self.base_config.jammer.pos_spk[0],
+                   self.base_config.jammer.pos_spk[1],
+                   marker="s", s=100, color="blue", label="Jammer")
+        cbar = fig.colorbar(im, ax=ax, label="SNR (dB)")
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        ax.set_title(f"Coverage Heatmap — {strategy} | {denoiser}\n"
+                     f"SNR at z={z} m, res={resolution}x{resolution}")
+        ax.legend(fontsize=7)
+        ax.set_aspect("equal")
+        fig.tight_layout()
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(path, dpi=150)
         plt.close(fig)

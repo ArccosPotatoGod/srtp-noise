@@ -14,21 +14,42 @@ from src.attacker import IDenoiser
 
 
 class ICADenoiser(IDenoiser):
-    """FastICA-based blind source separation (multi-channel)."""
+    """FastICA-based blind source separation (multi-channel).
 
-    def __init__(self, n_components: int = None):
+    Uses speech-band energy ratio (300-3400 Hz) to identify the speech
+    component among ICA sources.  For independent noise (Gaussian baseline)
+    ICA separates speech from noise; for coherent noise (MicFrozen) the
+    noise is coupled to speech and ICA cannot separate — matching the
+    paper's key claim.
+    """
+
+    def __init__(self, n_components: int = None, fs: int = 16000):
         self.n_components = n_components
+        self.fs = fs
 
-    def denoise(self, audio: np.ndarray) -> np.ndarray:
+    def _speech_score(self, component: np.ndarray) -> float:
+        """Short-time energy variance — speech has alternating loud/quiet frames,
+        while steady noise (Gaussian, etc.) has uniform energy across time."""
+        frame_len = int(0.025 * self.fs)  # 25 ms
+        n_frames = max(len(component) // frame_len, 4)
+        frame_len = len(component) // n_frames
+        frame_rms = np.array([
+            np.sqrt(np.mean(component[i * frame_len:(i + 1) * frame_len] ** 2))
+            for i in range(n_frames)
+        ])
+        mean_rms = np.mean(frame_rms) + 1e-12
+        return float(np.var(frame_rms) / mean_rms)
+
+    def denoise(self, audio: np.ndarray, noise_ref: np.ndarray = None) -> np.ndarray:
         from sklearn.decomposition import FastICA
         if audio.ndim < 2 or audio.shape[0] < 2:
             return audio  # need >= 2 channels
         n_comp = self.n_components or audio.shape[0]
         ica = FastICA(n_components=n_comp, random_state=0, max_iter=2000)
         S = ica.fit_transform(audio.T)  # (samples, components)
-        # Pick component with lowest energy as "noise" — crude heuristic
-        energies = np.sum(S ** 2, axis=0)
-        speech_idx = np.argmax(energies)
+        n_actual = S.shape[1]  # FastICA may reduce n_components to n_channels
+        scores = [self._speech_score(S[:, i]) for i in range(n_actual)]
+        speech_idx = int(np.argmax(scores))
         return S[:, speech_idx].astype(np.float32)
 
 
@@ -39,7 +60,7 @@ class SpectralSubtraction(IDenoiser):
         self.noise_frames = noise_frames
         self.alpha = alpha
 
-    def denoise(self, audio: np.ndarray) -> np.ndarray:
+    def denoise(self, audio: np.ndarray, noise_ref: np.ndarray = None) -> np.ndarray:
         if audio.ndim > 1:
             audio = audio[0]
         n_fft = 512
@@ -75,7 +96,7 @@ class BandstopFilter(IDenoiser):
         self.fs = fs
         self.order = order
 
-    def denoise(self, audio: np.ndarray) -> np.ndarray:
+    def denoise(self, audio: np.ndarray, noise_ref: np.ndarray = None) -> np.ndarray:
         from scipy.signal import butter, filtfilt
         if audio.ndim > 1:
             audio = audio[0]
@@ -96,7 +117,7 @@ class DelaySumBeamformer(IDenoiser):
         self.mic_spacing = mic_spacing
         self.speed_of_sound = speed_of_sound
 
-    def denoise(self, audio: np.ndarray) -> np.ndarray:
+    def denoise(self, audio: np.ndarray, noise_ref: np.ndarray = None) -> np.ndarray:
         if audio.ndim < 2 or audio.shape[0] < 2:
             return audio
         n_channels, n_samples = audio.shape
@@ -116,22 +137,24 @@ class DelaySumBeamformer(IDenoiser):
 class AdaptiveNoiseFilter(IDenoiser):
     """Sniffer-assisted NLMS adaptive noise filter (paper [32])."""
 
-    def __init__(self, n_taps: int = 64, mu: float = 0.005, fs: int = 16000):
+    def __init__(self, n_taps: int = 256, mu: float = 0.001, fs: int = 16000):
         self.n_taps = n_taps
         self.mu = mu
         self.fs = fs
 
-    def denoise(self, audio: np.ndarray) -> np.ndarray:
+    def denoise(self, audio: np.ndarray, noise_ref: np.ndarray = None) -> np.ndarray:
         if audio.ndim > 1:
             audio = audio[0]
         T = len(audio)
         w = np.zeros(self.n_taps, dtype=np.float32)
         out = np.zeros(T, dtype=np.float32)
         delta = 1e-4
-        # In practice the sniffer reference would be available as a second input.
-        # Here we approximate via self-reference (will be improved with proper ref).
+        # Use sniffer reference if available; otherwise fall back to self-reference.
+        ref = noise_ref if noise_ref is not None else audio
+        if ref.ndim > 1:
+            ref = ref[0]
         for n in range(self.n_taps, T):
-            x = audio[n - self.n_taps:n][::-1]
+            x = ref[n - self.n_taps:n][::-1]
             y = np.dot(w, x)
             e = audio[n] - y
             norm = np.dot(x, x) + delta
@@ -143,7 +166,7 @@ class AdaptiveNoiseFilter(IDenoiser):
 class NoDenoiser(IDenoiser):
     """Pass-through — returns raw recording unchanged."""
 
-    def denoise(self, audio: np.ndarray) -> np.ndarray:
+    def denoise(self, audio: np.ndarray, noise_ref: np.ndarray = None) -> np.ndarray:
         if audio.ndim > 1:
             return audio[0].astype(np.float32)
         return audio.astype(np.float32)
@@ -151,7 +174,8 @@ class NoDenoiser(IDenoiser):
 
 def create_denoiser(name: str, params: dict) -> IDenoiser:
     if name == "ica":
-        return ICADenoiser(n_components=params.get("n_components"))
+        return ICADenoiser(n_components=params.get("n_channels"),
+                          fs=params.get("fs", 16000))
     elif name == "spectral_subtraction":
         return SpectralSubtraction(
             noise_frames=params.get("noise_frames", 10),

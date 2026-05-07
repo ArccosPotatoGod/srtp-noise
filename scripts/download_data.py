@@ -31,14 +31,24 @@ def download_librispeech_sample():
 
 
 def download_audiomnist_sample():
-    """Download AudioMNIST (small subset)."""
+    """Download AudioMNIST (small subset via git sparse checkout)."""
     dest = DATA_DIR / "AudioMNIST"
     if dest.exists():
         print(f"AudioMNIST already exists at {dest}")
         return
-    # Placeholder — real AudioMNIST requires manual download from GitHub
-    print("AudioMNIST requires manual download. See:")
-    print("  https://github.com/soerenab/AudioMNIST")
+    dest.mkdir(parents=True, exist_ok=True)
+    url = "https://github.com/soerenab/AudioMNIST.git"
+    print(f"Cloning AudioMNIST (sparse checkout) from {url} ...")
+    subprocess.run(
+        ["git", "clone", "--depth", "1", "--filter=blob:none",
+         "--sparse", url, str(dest)],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(dest), "sparse-checkout", "set", "data"],
+        check=True,
+    )
+    print("AudioMNIST downloaded.")
 
 
 def generate_sample_wav():

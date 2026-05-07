@@ -11,7 +11,7 @@ from src.channel import ChannelModule
 from src.jammer import JammerModule
 from src.spy_mic import SpyMicrophoneModule
 from src.attacker import AttackerModule
-from src.evaluator import _compute_snr, _compute_cwer
+from src.evaluator import Evaluator
 from src.report import format_metrics_table
 from strategies.canceling import create_canceling
 from strategies.coherent import create_coherent
@@ -57,33 +57,33 @@ def run_scenario(config, rng, jammer_on=True):
                                config.attacker.denoiser_params)
     asr = create_asr(config.attacker.asr, {"ref_text": ref_text})
     attacker = AttackerModule(denoiser, asr)
-    enhanced, hyp_text = attacker.attack(spy_rec)
+    # Sniffer reference: jammer baseband through ultrasonic RIR to spy position
+    jammer_baseband = s_cancel + n_coherent
+    jammer_rir = ultrasonic_rirs["jammer_to_spy"][0]
+    noise_ref = fftconvolve(jammer_baseband, jammer_rir)[:len(s_src)]
+    noise_ref = nonlinearity.apply(noise_ref)
+    enhanced, hyp_text = attacker.attack(spy_rec, noise_ref=noise_ref)
 
-    # SNR: speech power / jamming residual power
-    min_len = min(len(speech_at_spy), len(spy_rec))
-    jamming_residual = spy_rec[:min_len] - speech_at_spy[:min_len]
-    p_speech = float(np.sum(speech_at_spy[:min_len] ** 2))
-    p_jam = float(np.sum(jamming_residual ** 2))
-    snr_raw = 10.0 * np.log10(p_speech / max(p_jam, 1e-12))
+    # SNR: speech power / jamming residual power (use first channel)
+    spy_1d = spy_rec[0] if spy_rec.ndim > 1 else spy_rec
+    enh_1d = enhanced[0] if enhanced.ndim > 1 else enhanced
+    min_len = min(len(speech_at_spy), len(spy_1d))
+    jamming_residual = spy_1d[:min_len] - speech_at_spy[:min_len]
 
-    min_len_e = min(len(speech_at_spy), len(enhanced))
-    jamming_after_denoise = enhanced[:min_len_e] - speech_at_spy[:min_len_e]
-    p_jam_enh = float(np.sum(jamming_after_denoise ** 2))
-    snr_enhanced = 10.0 * np.log10(p_speech / max(p_jam_enh, 1e-12))
-
-    cwer_enhanced = _compute_cwer(ref_text, hyp_text)
-    raw_hyp = asr.transcribe(spy_rec)
-    cwer_raw = _compute_cwer(ref_text, raw_hyp)
+    evaluator = Evaluator(fs=config.sim.fs)
+    raw_hyp = asr.transcribe(spy_1d)
+    eval_metrics = evaluator.evaluate(speech_at_spy, spy_1d, enh_1d,
+                                      ref_text, raw_hyp, hyp_text)
 
     metrics = {
-        "snr_raw_db": snr_raw,
-        "snr_enhanced_db": snr_enhanced,
-        "cwer_raw_pct": cwer_raw,
-        "cwer_enhanced_pct": cwer_enhanced,
+        "snr_raw_db": eval_metrics["snr_raw"],
+        "snr_enhanced_db": eval_metrics["snr_enhanced"],
+        "cwer_raw_pct": eval_metrics["cwer_raw"],
+        "cwer_enhanced_pct": eval_metrics["cwer_enhanced"],
     }
     diagnostics = {
         "speech_rms": float(np.sqrt(np.mean(speech_at_spy ** 2))),
-        "spy_rms": float(np.sqrt(np.mean(spy_rec ** 2))),
+        "spy_rms": float(np.sqrt(np.mean(spy_1d ** 2))),
         "jamming_rms": float(np.sqrt(np.mean(jamming_residual ** 2))),
         "cancel_rms": float(np.sqrt(np.mean(s_cancel ** 2))),
         "noise_rms": float(np.sqrt(np.mean(n_coherent ** 2))),
@@ -135,6 +135,16 @@ def main():
     snr_drop = met_off["snr_raw_db"] - met_on["snr_raw_db"]
     print(f"\n>>> SNR reduction from jamming: {snr_drop:.1f} dB")
     print("=" * 60)
+
+    # Export text report
+    from src.evaluator import save_text_report
+    results = [
+        {**met_on, "scenario": "Jammer ON"},
+        {**met_off, "scenario": "Jammer OFF"},
+    ]
+    save_text_report(results, "results/single_report.txt",
+                     title="MicFrozen Single-Run Report")
+    print("\nText report saved to results/single_report.txt")
 
 
 if __name__ == "__main__":

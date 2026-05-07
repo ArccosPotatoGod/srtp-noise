@@ -25,7 +25,7 @@ class SourceConfig:
 @dataclass
 class JammerConfig:
     pos_spk: Tuple[float, float, float] = (1.2, 2.5, 1.5)
-    ref_mic_pos: Tuple[float, float, float] = (1.05, 2.5, 1.5)
+    ref_mic_pos: Tuple[float, float, float] = (1.1, 2.5, 1.5)
     canceling_strategy: str = "phase_inversion"
     coherent_strategy: str = "fixed_weight"
     system_gain_db: float = 36.0
@@ -55,9 +55,7 @@ class SpyMicConfig:
 class AttackerConfig:
     denoiser: str = "ica"
     asr: str = "whisper_tiny"
-    denoiser_params: Dict[str, Any] = field(default_factory=lambda: {
-        "n_channels": 4,
-    })
+    denoiser_params: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
