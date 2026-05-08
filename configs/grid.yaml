@@ -11,4 +11,5 @@
 grid:
   spy_mic_distance: [1.0, 2.0, 3.0, 5.0]
   jammer.coherent_strategy: ["off", "fixed_weight", "gaussian_baseline", "sweeping_baseline", "hopping_baseline"]
+  jammer.canceling_strategy: ["off", "phase_inversion"]
   attacker.denoiser: ["ica", "spectral_subtraction", "bandstop", "beamforming", "adaptive_noise_filter", "none"]

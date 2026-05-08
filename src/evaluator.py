@@ -118,12 +118,22 @@ def format_text_report(results: List[Dict], title: str = "MicFrozen Experiment R
 
     # Per-strategy breakdown (raw metrics)
     strategy_key = next((k for k in non_metric_keys if "coherent_strategy" in k.lower()), None)
+    cancel_key = next((k for k in non_metric_keys if "canceling_strategy" in k.lower()), None)
     denoiser_key = next((k for k in non_metric_keys if "denoiser" in k.lower()), None)
     if strategy_key and denoiser_key:
         lines.append("")
         lines.append("--- Per-Strategy × Denoiser Breakdown ---")
 
-        strategies = sorted(set(str(r.get(strategy_key, "?")) for r in results))
+        # Build composite row labels: coherent_strategy + optional cancel marker
+        def _row_label(r):
+            s = str(r.get(strategy_key, "?"))
+            if cancel_key:
+                c = str(r.get(cancel_key, "phase_inversion"))
+                if c == "off":
+                    return f"{s} (no cancel)"
+            return s
+
+        strategies = sorted(set(_row_label(r) for r in results))
         denoisers = sorted(set(str(r.get(denoiser_key, "?")) for r in results))
 
         for metric_key, metric_label in [
@@ -136,14 +146,15 @@ def format_text_report(results: List[Dict], title: str = "MicFrozen Experiment R
                 continue
             lines.append(f"\n  [{metric_label}]")
             col_w = max(max(len(d) for d in denoisers), 10) + 2
-            header = f"  {'Strategy':<24}" + "".join(f"{d:>{col_w}}" for d in denoisers)
+            max_label = max(len(s) for s in strategies)
+            header = f"  {'Strategy':<{max_label}}" + "".join(f"{d:>{col_w}}" for d in denoisers)
             lines.append(header)
-            lines.append("  " + "-" * (24 + col_w * len(denoisers)))
+            lines.append("  " + "-" * (max_label + col_w * len(denoisers)))
             for strat in strategies:
-                row = f"  {strat:<24}"
+                row = f"  {strat:<{max_label}}"
                 for den in denoisers:
                     vals = [r[metric_key] for r in results
-                            if str(r.get(strategy_key)) == strat
+                            if _row_label(r) == strat
                             and str(r.get(denoiser_key)) == den
                             and isinstance(r.get(metric_key), (int, float))]
                     if vals:

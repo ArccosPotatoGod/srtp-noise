@@ -43,7 +43,7 @@ def main():
     runner.plot_snr_vs_distance("results/snr_vs_distance.png")
     runner.plot_cwer_vs_distance("results/cwer_vs_distance.png")
 
-    # Enhanced metric plots (per denoiser) for each strategy
+    # Enhanced metric plots (per denoiser, with cancel/no-cancel distinction) for each strategy
     strategies = ["off", "fixed_weight", "gaussian_baseline", "sweeping_baseline", "hopping_baseline"]
     for strat in strategies:
         runner.plot_snr_enhanced_vs_distance(
@@ -51,10 +51,13 @@ def main():
         runner.plot_cwer_enhanced_vs_distance(
             f"results/cwer_enhanced_{strat}.png", strategy=strat)
 
-    # Denoiser comparison bar charts at key distances
+    # Denoiser comparison bar charts at key distances (with cancel/no-cancel distinction)
     for dist in [1.0, 3.0]:
         runner.plot_denoiser_comparison(
             f"results/denoiser_comparison_{dist:.0f}m.png", distance=dist)
+
+    # Scenario comparison: noise+cancel vs noise only (no cancel) vs no jammer
+    runner.plot_scenario_comparison("results/scenario_comparison.png")
 
     # CWER scatter: raw vs enhanced
     runner.plot_cwer_scatter("results/cwer_scatter.png")

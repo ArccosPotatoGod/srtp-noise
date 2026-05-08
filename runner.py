@@ -74,6 +74,11 @@ class ExperimentRunner:
                 config.jammer.coherent_strategy = val
                 if val == "off":
                     config.jammer.canceling_strategy = "off"
+            elif key_path == "jammer.canceling_strategy":
+                # Only honor when coherent_strategy is active; otherwise
+                # the coherent_strategy handler forces canceling off.
+                if config.jammer.coherent_strategy != "off":
+                    config.jammer.canceling_strategy = val
             else:
                 parts = key_path.split(".")
                 obj = config
@@ -186,58 +191,93 @@ class ExperimentRunner:
             groups[label].append((r.get(key_x, 0), r.get(key_y, 0)))
         return groups
 
+    def _build_strategy_cancel_label(self, r: Dict) -> str:
+        """Composite label: coherent_strategy + optional cancel marker."""
+        strat = r.get("jammer.coherent_strategy", "?")
+        cancel = r.get("jammer.canceling_strategy", "phase_inversion")
+        if cancel == "off":
+            return f"{strat} (no cancel)"
+        return strat
+
     def plot_snr_vs_distance(self, path: str) -> None:
-        """Plot raw SNR vs distance grouped by jamming strategy only.
+        """Plot raw SNR vs distance grouped by jamming strategy + canceling.
 
         Raw SNR is measured before any denoiser is applied, so denoiser
-        choice does not affect these values.
+        choice does not affect these values.  Canceling strategy does
+        affect the raw spy recording, so both are shown.
         """
         import matplotlib.pyplot as plt
         if not self.results:
             return
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        groups = self._group_by("spy_mic_distance", "snr_raw",
-                                "jammer.coherent_strategy")
-        fig, ax = plt.subplots(figsize=(8, 5))
-        markers = ["o", "s", "D", "^", "v"]
-        for i, (label, pts) in enumerate(sorted(groups.items())):
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for r in self.results:
+            label = self._build_strategy_cancel_label(r)
+            groups[label].append((r.get("spy_mic_distance", 0), r.get("snr_raw", 0)))
+        # Aggregate: average snr_raw per (label, distance) since multiple
+        # denoiser rows share the same raw value
+        agg = defaultdict(list)
+        for label, pts in groups.items():
+            by_dist = defaultdict(list)
+            for d, v in pts:
+                by_dist[d].append(v)
+            for d, vs in by_dist.items():
+                agg[label].append((d, float(np.mean(vs))))
+        fig, ax = plt.subplots(figsize=(10, 5))
+        markers = ["o", "s", "D", "^", "v", "p", "h", "*"]
+        for i, (label, pts) in enumerate(sorted(agg.items())):
             pts_sorted = sorted(pts, key=lambda x: x[0])
             x = [p[0] for p in pts_sorted]
             y = [p[1] for p in pts_sorted]
-            ax.plot(x, y, marker=markers[i % len(markers)], linestyle="-", label=label)
+            style = "--" if "no cancel" in label else "-"
+            ax.plot(x, y, marker=markers[i % len(markers)], linestyle=style, label=label)
         ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
         ax.set_xlabel("Distance (m)")
         ax.set_ylabel("SNR (dB)")
         ax.set_title("SNR vs Distance (raw recording)")
-        ax.legend(fontsize=9)
+        ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         fig.savefig(path, dpi=150)
         plt.close(fig)
 
     def plot_cwer_vs_distance(self, path: str) -> None:
-        """Plot raw CWER vs distance grouped by jamming strategy only.
+        """Plot raw CWER vs distance grouped by jamming strategy + canceling.
 
         Raw CWER is measured before any denoiser is applied, so denoiser
-        choice does not affect these values.
+        choice does not affect these values.  Canceling strategy does
+        affect the raw spy recording, so both are shown.
         """
         import matplotlib.pyplot as plt
         if not self.results:
             return
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        groups = self._group_by("spy_mic_distance", "cwer_raw",
-                                "jammer.coherent_strategy")
-        fig, ax = plt.subplots(figsize=(8, 5))
-        markers = ["o", "s", "D", "^", "v"]
-        for i, (label, pts) in enumerate(sorted(groups.items())):
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for r in self.results:
+            label = self._build_strategy_cancel_label(r)
+            groups[label].append((r.get("spy_mic_distance", 0), r.get("cwer_raw", 0)))
+        # Aggregate: average cwer_raw per (label, distance)
+        agg = defaultdict(list)
+        for label, pts in groups.items():
+            by_dist = defaultdict(list)
+            for d, v in pts:
+                by_dist[d].append(v)
+            for d, vs in by_dist.items():
+                agg[label].append((d, float(np.mean(vs))))
+        fig, ax = plt.subplots(figsize=(10, 5))
+        markers = ["o", "s", "D", "^", "v", "p", "h", "*"]
+        for i, (label, pts) in enumerate(sorted(agg.items())):
             pts_sorted = sorted(pts, key=lambda x: x[0])
             x = [p[0] for p in pts_sorted]
             y = [p[1] for p in pts_sorted]
-            ax.plot(x, y, marker=markers[i % len(markers)], linestyle="-", label=label)
+            style = "--" if "no cancel" in label else "-"
+            ax.plot(x, y, marker=markers[i % len(markers)], linestyle=style, label=label)
         ax.set_xlabel("Distance (m)")
         ax.set_ylabel("CWER (%)")
         ax.set_title("CWER vs Distance (raw recording)")
-        ax.legend(fontsize=9)
+        ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         fig.savefig(path, dpi=150)
@@ -248,38 +288,40 @@ class ExperimentRunner:
     # ------------------------------------------------------------------
 
     def plot_snr_enhanced_vs_distance(self, path: str, strategy: str = "fixed_weight") -> None:
-        """Plot enhanced SNR vs distance for one jamming strategy, grouped by denoiser."""
+        """Plot enhanced SNR vs distance for one jamming strategy, grouped by denoiser+canceling."""
         import matplotlib.pyplot as plt
         if not self.results:
             return
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         subset = [r for r in self.results if r.get("jammer.coherent_strategy") == strategy]
-        groups = self._group_by("spy_mic_distance", "snr_enhanced", "attacker.denoiser")
-        # Re-group from filtered subset
         from collections import defaultdict
         groups = defaultdict(list)
         for r in subset:
-            groups[r.get("attacker.denoiser", "?")].append(
+            den = r.get("attacker.denoiser", "?")
+            cancel = r.get("jammer.canceling_strategy", "?")
+            label = f"{den}" if cancel == "phase_inversion" else f"{den} (no cancel)"
+            groups[label].append(
                 (r.get("spy_mic_distance", 0), r.get("snr_enhanced", 0)))
-        fig, ax = plt.subplots(figsize=(8, 5))
-        markers = ["o", "s", "D", "^", "v", "p"]
+        fig, ax = plt.subplots(figsize=(10, 6))
+        markers = ["o", "s", "D", "^", "v", "p", "h", "*"]
         for i, (label, pts) in enumerate(sorted(groups.items())):
             pts_sorted = sorted(pts, key=lambda x: x[0])
             x = [p[0] for p in pts_sorted]
             y = [p[1] for p in pts_sorted]
-            ax.plot(x, y, marker=markers[i % len(markers)], linestyle="-", label=label)
+            style = "--" if "no cancel" in label else "-"
+            ax.plot(x, y, marker=markers[i % len(markers)], linestyle=style, label=label)
         ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
         ax.set_xlabel("Distance (m)")
         ax.set_ylabel("SNR (dB)")
         ax.set_title(f"SNR vs Distance — after denoising ({strategy})")
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         fig.savefig(path, dpi=150)
         plt.close(fig)
 
     def plot_cwer_enhanced_vs_distance(self, path: str, strategy: str = "fixed_weight") -> None:
-        """Plot enhanced CWER vs distance for one jamming strategy, grouped by denoiser."""
+        """Plot enhanced CWER vs distance for one jamming strategy, grouped by denoiser+canceling."""
         import matplotlib.pyplot as plt
         if not self.results:
             return
@@ -288,19 +330,23 @@ class ExperimentRunner:
         from collections import defaultdict
         groups = defaultdict(list)
         for r in subset:
-            groups[r.get("attacker.denoiser", "?")].append(
+            den = r.get("attacker.denoiser", "?")
+            cancel = r.get("jammer.canceling_strategy", "?")
+            label = f"{den}" if cancel == "phase_inversion" else f"{den} (no cancel)"
+            groups[label].append(
                 (r.get("spy_mic_distance", 0), r.get("cwer_enhanced", 0)))
-        fig, ax = plt.subplots(figsize=(8, 5))
-        markers = ["o", "s", "D", "^", "v", "p"]
+        fig, ax = plt.subplots(figsize=(10, 6))
+        markers = ["o", "s", "D", "^", "v", "p", "h", "*"]
         for i, (label, pts) in enumerate(sorted(groups.items())):
             pts_sorted = sorted(pts, key=lambda x: x[0])
             x = [p[0] for p in pts_sorted]
             y = [p[1] for p in pts_sorted]
-            ax.plot(x, y, marker=markers[i % len(markers)], linestyle="-", label=label)
+            style = "--" if "no cancel" in label else "-"
+            ax.plot(x, y, marker=markers[i % len(markers)], linestyle=style, label=label)
         ax.set_xlabel("Distance (m)")
         ax.set_ylabel("CWER (%)")
         ax.set_title(f"CWER vs Distance — after denoising ({strategy})")
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         fig.savefig(path, dpi=150)
@@ -311,7 +357,7 @@ class ExperimentRunner:
     # ------------------------------------------------------------------
 
     def plot_denoiser_comparison(self, path: str, distance: float = 1.0) -> None:
-        """Grouped bar chart: cwer_enhanced per denoiser, grouped by strategy."""
+        """Grouped bar chart: cwer_enhanced per denoiser, grouped by strategy+canceling."""
         import matplotlib.pyplot as plt
         if not self.results:
             return
@@ -322,30 +368,40 @@ class ExperimentRunner:
         if not subset:
             return
 
-        strategies = sorted(set(r["jammer.coherent_strategy"] for r in subset))
+        # Build combined strategy+canceling labels
+        strat_labels = sorted(set(
+            f"{r['jammer.coherent_strategy']}"
+            + ("" if r.get("jammer.canceling_strategy") == "phase_inversion"
+               else " (no cancel)")
+            for r in subset
+        ))
         denoisers = sorted(set(r["attacker.denoiser"] for r in subset))
 
         x = np.arange(len(denoisers))
-        width = 0.8 / len(strategies)
+        width = 0.8 / len(strat_labels)
 
-        fig, ax = plt.subplots(figsize=(12, 5))
-        for i, strat in enumerate(strategies):
-            strat_rows = [r for r in subset if r["jammer.coherent_strategy"] == strat]
+        fig, ax = plt.subplots(figsize=(14, 6))
+        for i, sl in enumerate(strat_labels):
+            sl_parts = sl.split(" (no cancel)")
+            strat = sl_parts[0]
+            no_cancel = len(sl_parts) > 1
+            strat_rows = [r for r in subset
+                          if r["jammer.coherent_strategy"] == strat
+                          and (no_cancel == (r.get("jammer.canceling_strategy") != "phase_inversion"))]
             den_map = {r["attacker.denoiser"]: r.get("cwer_enhanced", 0) for r in strat_rows}
             y = [den_map.get(d, 0) for d in denoisers]
-            bars = ax.bar(x + i * width, y, width, label=strat)
-            # Annotate bars with values
+            bars = ax.bar(x + i * width, y, width, label=sl)
             for bar, val in zip(bars, y):
                 if val > 0:
                     ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
-                            f"{val:.0f}", ha="center", va="bottom", fontsize=7)
+                            f"{val:.0f}", ha="center", va="bottom", fontsize=6)
 
         ax.set_xlabel("Denoiser")
         ax.set_ylabel("CWER (%)")
         ax.set_title(f"Denoiser Comparison — cwer_enhanced at {distance:.0f} m")
-        ax.set_xticks(x + width * (len(strategies) - 1) / 2)
+        ax.set_xticks(x + width * (len(strat_labels) - 1) / 2)
         ax.set_xticklabels(denoisers, rotation=30, ha="right")
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=6)
         ax.grid(True, alpha=0.3, axis="y")
         fig.tight_layout()
         fig.savefig(path, dpi=150)
@@ -362,17 +418,17 @@ class ExperimentRunner:
             return
         Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-        strategies = sorted(set(r["jammer.coherent_strategy"] for r in self.results))
+        strategies = sorted(set(self._build_strategy_cancel_label(r) for r in self.results))
         denoisers = sorted(set(r["attacker.denoiser"] for r in self.results))
-        colors = plt.cm.tab10(np.linspace(0, 1, len(strategies)))
+        colors = plt.cm.tab20(np.linspace(0, 1, len(strategies)))
         markers = ["o", "s", "D", "^", "v", "p"]
 
-        fig, ax = plt.subplots(figsize=(9, 7))
+        fig, ax = plt.subplots(figsize=(12, 7))
         for si, strat in enumerate(strategies):
             for di, den in enumerate(denoisers):
                 pts = [(r["cwer_raw"], r["cwer_enhanced"])
                        for r in self.results
-                       if r.get("jammer.coherent_strategy") == strat
+                       if self._build_strategy_cancel_label(r) == strat
                        and r.get("attacker.denoiser") == den]
                 if not pts:
                     continue
@@ -400,6 +456,120 @@ class ExperimentRunner:
         ax.legend(handles=denoiser_handles, title="Denoiser", fontsize=7,
                  loc="lower right")
         ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Scenario comparison: no-jammer vs noise-only vs noise+cancel
+    # ------------------------------------------------------------------
+
+    def plot_scenario_comparison(self, path: str) -> None:
+        """Compare the three core jamming scenarios across all distances.
+
+        Scenarios:
+          1. off (no noise, no cancel)           — baseline
+          2. active + cancel=off (noise only)    — no anti-speech cancel
+          3. active + cancel=phase_inversion     — full MicFrozen
+        """
+        import matplotlib.pyplot as plt
+        if not self.results:
+            return
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        from collections import defaultdict
+
+        # Classify each result into one of three scenarios
+        def _scenario(r):
+            if r.get("jammer.coherent_strategy") == "off":
+                return "1. jammer off"
+            if r.get("jammer.canceling_strategy") == "off":
+                return "2. noise only (no cancel)"
+            return "3. noise + cancel"
+
+        scenarios = ["1. jammer off", "2. noise only (no cancel)", "3. noise + cancel"]
+        denoisers = sorted(set(r["attacker.denoiser"] for r in self.results))
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+        colors = {"1. jammer off": "tab:green",
+                  "2. noise only (no cancel)": "tab:orange",
+                  "3. noise + cancel": "tab:red"}
+
+        # --- Panel 1: Raw SNR vs distance (per scenario, averaged over denoisers) ---
+        ax = axes[0][0]
+        for sc in scenarios:
+            by_dist = defaultdict(list)
+            for r in self.results:
+                if _scenario(r) == sc:
+                    by_dist[r["spy_mic_distance"]].append(r["snr_raw"])
+            if not by_dist:
+                continue
+            dists = sorted(by_dist.keys())
+            vals = [np.mean(by_dist[d]) for d in dists]
+            ax.plot(dists, vals, "o-", color=colors[sc], label=sc, markersize=8)
+        ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
+        ax.set_xlabel("Distance (m)")
+        ax.set_ylabel("SNR raw (dB)")
+        ax.set_title("Raw SNR: Three Scenarios")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        # --- Panel 2: Raw CWER vs distance ---
+        ax = axes[0][1]
+        for sc in scenarios:
+            by_dist = defaultdict(list)
+            for r in self.results:
+                if _scenario(r) == sc:
+                    by_dist[r["spy_mic_distance"]].append(r["cwer_raw"])
+            if not by_dist:
+                continue
+            dists = sorted(by_dist.keys())
+            vals = [np.mean(by_dist[d]) for d in dists]
+            ax.plot(dists, vals, "s-", color=colors[sc], label=sc, markersize=8)
+        ax.set_xlabel("Distance (m)")
+        ax.set_ylabel("CWER raw (%)")
+        ax.set_title("Raw CWER: Three Scenarios")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        # --- Panel 3: Enhanced CWER for spectral_subtraction only ---
+        ax = axes[1][0]
+        for sc in scenarios:
+            by_dist = defaultdict(list)
+            for r in self.results:
+                if _scenario(r) == sc and r.get("attacker.denoiser") == "spectral_subtraction":
+                    by_dist[r["spy_mic_distance"]].append(r["cwer_enhanced"])
+            if not by_dist:
+                continue
+            dists = sorted(by_dist.keys())
+            vals = [np.mean(by_dist[d]) for d in dists]
+            ax.plot(dists, vals, "D-", color=colors[sc], label=sc, markersize=8)
+        ax.set_xlabel("Distance (m)")
+        ax.set_ylabel("CWER enhanced (%)")
+        ax.set_title("Enhanced CWER: spectral_subtraction")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        # --- Panel 4: CWER raw vs enhanced for all scenarios ---
+        ax = axes[1][1]
+        for sc in scenarios:
+            xs, ys = [], []
+            for r in self.results:
+                if _scenario(r) == sc:
+                    xs.append(r["cwer_raw"])
+                    ys.append(r["cwer_enhanced"])
+            if xs:
+                ax.scatter(xs, ys, c=colors[sc], label=sc, alpha=0.6, s=30)
+        ax.plot([0, 100], [0, 100], "k--", alpha=0.3)
+        ax.set_xlabel("CWER raw (%)")
+        ax.set_ylabel("CWER enhanced (%)")
+        ax.set_title("CWER: Raw vs Enhanced (all denoisers)")
+        ax.set_xlim(-2, 105)
+        ax.set_ylim(-2, 105)
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        fig.suptitle("MicFrozen Scenario Comparison", fontsize=13, fontweight="bold")
         fig.tight_layout()
         fig.savefig(path, dpi=150)
         plt.close(fig)
