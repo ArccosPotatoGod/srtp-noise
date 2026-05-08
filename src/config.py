@@ -117,7 +117,56 @@ class ScenarioConfig:
 def load_config(path: str) -> ScenarioConfig:
     return ScenarioConfig.from_yaml(path)
 
+
 def load_grid_config(path: str) -> Dict:
     with open(path, "r") as f:
         raw = yaml.safe_load(f)
     return raw.get("grid", {})
+
+
+def apply_overrides(base_config: ScenarioConfig, override: Dict) -> ScenarioConfig:
+    """Deep-copy base_config and apply key-value overrides.
+
+    Special keys (handled positionally, not via setattr):
+      - spy_mic_distance: place spy mics at given distance along x-axis
+      - spy_mic_angle: rotate spy mic around source at given angle
+      - jammer.coherent_strategy: forces canceling_strategy="off" when coherent="off"
+      - jammer.canceling_strategy: only honored when coherent_strategy is active
+    """
+    import copy
+    import math
+
+    config = copy.deepcopy(base_config)
+    for key_path, val in override.items():
+        if key_path == "spy_mic_distance":
+            src = base_config.source.pos
+            primary = (src[0] + float(val), src[1], src[2])
+            secondary = (primary[0], primary[1] + 0.15, primary[2])
+            config.spy_mic.positions = [primary, secondary]
+        elif key_path == "spy_mic_angle":
+            src = base_config.source.pos
+            rad = math.radians(val)
+            base_pos = base_config.spy_mic.positions[0]
+            dist = math.sqrt(
+                (base_pos[0] - src[0]) ** 2 + (base_pos[1] - src[1]) ** 2
+            )
+            new_x = src[0] + dist * math.cos(rad)
+            new_y = src[1] + dist * math.sin(rad)
+            config.spy_mic.positions = [
+                (new_x, new_y, base_pos[2])
+                for base_pos in base_config.spy_mic.positions
+            ]
+        elif key_path == "jammer.coherent_strategy":
+            config.jammer.coherent_strategy = val
+            if val == "off":
+                config.jammer.canceling_strategy = "off"
+        elif key_path == "jammer.canceling_strategy":
+            if config.jammer.coherent_strategy != "off":
+                config.jammer.canceling_strategy = val
+        else:
+            parts = key_path.split(".")
+            obj = config
+            for part in parts[:-1]:
+                obj = getattr(obj, part)
+            setattr(obj, parts[-1], val)
+    return config
