@@ -15,7 +15,7 @@ class WhisperASR(IASREngine):
         import whisper
         self._model = whisper.load_model(self.model_size)
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, seed_offset: int = 0) -> str:
         if self._model is None:
             self._load_model()
         audio_fp32 = audio.astype(np.float32)
@@ -31,7 +31,7 @@ class GoogleSTT(IASREngine):
     def __init__(self, language_code: str = "en-US"):
         self.language_code = language_code
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, seed_offset: int = 0) -> str:
         import io
         import soundfile as sf
         buf = io.BytesIO()
@@ -77,7 +77,7 @@ class DummyASR(IASREngine):
         self.fs = fs
         self._variance_threshold = variance_threshold
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, seed_offset: int = 0) -> str:
         sig = audio.astype(np.float64)
         if sig.ndim > 1:
             sig = sig[0]

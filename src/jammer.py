@@ -20,8 +20,6 @@ class JammerModule:
         ref = fftconvolve(s_src, ref_rir)[:len(s_src)]
         # Normalize ref to same RMS as s_src (compensates near-field RIR gain)
         rms_src = float(np.sqrt(np.mean(s_src ** 2))) or 1.0
-        rms_ref = float(np.sqrt(np.mean(ref ** 2))) or 1.0
-        ref = ref * (rms_src / rms_ref)
         s_cancel = self.cancel_strategy.compute(ref)
         n_coherent = self.coherent_strategy.compute(s_src)
         # Normalize coherent noise to same RMS as speech, then apply system gain

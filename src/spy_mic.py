@@ -52,7 +52,8 @@ class SpyMicrophoneModule:
             spy_speech = fftconvolve(s_src, self.rir_src_to_spy[ch])[:T]
             # Ultrasonic path — nonlinear demodulation
             ultrasonic_arrival = fftconvolve(jammer_baseband, self.rir_jammer_to_spy[ch])[:T]
-            jammer_demod = self.nonlinearity.apply(ultrasonic_arrival)
+            # jammer_demod = self.nonlinearity.apply(ultrasonic_arrival)
+            jammer_demod = ultrasonic_arrival
             recordings.append(spy_speech + jammer_demod)
 
         out = np.stack(recordings).astype(np.float32)

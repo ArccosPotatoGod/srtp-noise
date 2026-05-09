@@ -3,19 +3,19 @@ sim:
   duration: null
 
 room:
-  dim: [6.0, 5.0, 3.0]
-  rt60: 0.3
+  dim: [6.0, 5.0, 6.0]
+  rt60: 0.18
   temperature: 20.0
   humidity: 50.0
 
 source:
   pos: [1.0, 2.5, 1.5]
   audio_dataset: "librispeech"
-  audio_file: null
+  audio_file: data/speech-1.wav
 
 jammer:
-  pos_spk: [1.2, 2.5, 1.5]
-  ref_mic_pos: [1.10, 2.5, 1.5]
+  pos_spk: [1.0, 2.5, 1.5]       # co-located with source for RIR matching
+  ref_mic_pos: [1.001, 2.5, 1.5]  # 1 cm from source — near-direct pickup
   canceling_strategy: "phase_inversion"
   coherent_strategy: "fixed_weight"
   system_gain_db: 20.0
@@ -37,7 +37,7 @@ spy_mic:
 
 attacker:
   denoiser: "ica"
-  asr: "quality"
+  asr: "whisper_tiny"
   denoiser_params: {}
     # n_channels auto-detected from number of spy mics
 

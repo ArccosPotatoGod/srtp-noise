@@ -29,5 +29,5 @@ class IDenoiser(ABC):
 
 class IASREngine(ABC):
     @abstractmethod
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, seed_offset: int = 0) -> str:
         raise NotImplementedError
